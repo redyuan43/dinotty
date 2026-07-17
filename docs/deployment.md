@@ -100,6 +100,23 @@ docker buildx build --platform linux/amd64,linux/arm64 \
   -f deploy/docker/Dockerfile .
 ```
 
+### 公网 Docker 部署
+
+不要直接映射 Dinotty 的端口到公网。生产覆盖文件会使用由 CI 或可信构建机准备
+的静态二进制，移除主机端口映射，并让容器只加入 HTTPS 反向代理所在的私有 Docker
+网络：
+
+```bash
+cd deploy/docker
+cp .env.production.example .env
+# CI/构建机先生成 .deploy-artifacts/dinotty-server
+docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --build
+```
+
+生产覆盖会启用 `DINOTTY_COOKIE_SECURE=true`，使浏览器会话 Cookie 只能通过
+HTTPS 发送。设置 `DINOTTY_CADDY_NETWORK` 为现有反向代理网络名；反向代理
+还应提供独立认证层，并保留 Dinotty 的强随机 Token。
+
 Windows 上可通过 Docker Desktop 使用 Linux 容器部署；`.env` 中的工作区路径需要按 Docker Desktop 的挂载路径填写。
 
 ## 跨平台包
@@ -120,6 +137,7 @@ Windows 上可通过 Docker Desktop 使用 Linux 容器部署；`.env` 中的工
 | Token | `DINOTTY_TOKEN` 环境变量或配置文件 | 未配置 / 首次设置 | 访问认证令牌，为空时进入首次设置流程 |
 | 日志级别 | `RUST_LOG` 环境变量 | info | trace / debug / info / warn / error |
 | Shell | Unix: `SHELL`；Windows: `DINOTTY_SHELL` | 自动检测 | Windows 优先 `DINOTTY_SHELL`，再尝试 `pwsh.exe`、`powershell.exe`、`%ComSpec%` / `cmd.exe` |
+| Secure Cookie | `DINOTTY_COOKIE_SECURE` | `false` | 公网 HTTPS 反向代理部署设为 `true`，为浏览器会话 Cookie 添加 `Secure` 属性 |
 | 分离会话回收时间 | `DINOTTY_DETACH_REAP_SECS` 环境变量 | 5400（90 分钟） | seconds a detached (disconnected) session is kept before the cleanup task reaps it; default 5400 (90 minutes) |
 
 ### 配置与数据目录

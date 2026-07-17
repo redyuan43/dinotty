@@ -1,0 +1,34 @@
+# Runtime-only production image.
+#
+# CI or a trusted build machine cross-compiles the static
+# x86_64-unknown-linux-musl binary, then places it at
+# .deploy-artifacts/dinotty-server before building this image.
+FROM alpine:3.21
+
+RUN apk add --no-cache \
+    bash \
+    zsh \
+    coreutils \
+    ca-certificates \
+    tini \
+    curl
+
+RUN adduser -D -s /bin/bash -h /home/dinotty dinotty
+
+WORKDIR /home/dinotty
+
+COPY .deploy-artifacts/dinotty-server /usr/local/bin/dinotty-server
+COPY deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/dinotty-server /usr/local/bin/entrypoint.sh && \
+    mkdir -p /home/dinotty/.dinotty/plugins && \
+    chown -R dinotty:dinotty /home/dinotty
+
+USER dinotty
+
+ENV DINOTTY_PORT=8999
+ENV RUST_LOG=info
+
+EXPOSE 8999
+
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+CMD ["dinotty-server"]

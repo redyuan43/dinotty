@@ -377,17 +377,29 @@ struct LoginRequest {
     token: String,
 }
 
-fn build_session_cookie(session_id: &str, ttl_days: u64) -> String {
+fn secure_cookies_enabled() -> bool {
+    matches!(
+        std::env::var("DINOTTY_COOKIE_SECURE").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+fn build_session_cookie(session_id: &str, ttl_days: u64, secure: bool) -> String {
     let max_age = ttl_days * 86_400;
+    let secure_attr = if secure { "; Secure" } else { "" };
     format!(
-        "{name}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}",
+        "{name}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}{secure_attr}",
         name = auth::SESSION_COOKIE_NAME,
         value = session_id,
     )
 }
 
-fn clear_session_cookie() -> String {
-    format!("{name}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0", name = auth::SESSION_COOKIE_NAME)
+fn clear_session_cookie(secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!(
+        "{name}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{secure_attr}",
+        name = auth::SESSION_COOKIE_NAME
+    )
 }
 
 /// Login endpoint: validate the posted token, create a session, set cookie.
@@ -467,7 +479,7 @@ async fn login(
         let s = state.settings.read().await;
         s.auth.session_ttl_days
     };
-    let cookie = build_session_cookie(&session_id, ttl_days);
+    let cookie = build_session_cookie(&session_id, ttl_days, secure_cookies_enabled());
 
     // Audit log
     let () = state.audit.record(
@@ -507,7 +519,10 @@ async fn logout(
     (
         StatusCode::OK,
         [
-            (header::SET_COOKIE, HeaderValue::from_str(&clear_session_cookie()).unwrap()),
+            (
+                header::SET_COOKIE,
+                HeaderValue::from_str(&clear_session_cookie(secure_cookies_enabled())).unwrap(),
+            ),
             (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
         ],
         Json(serde_json::json!({"ok": true})),
@@ -917,4 +932,27 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     notify_manager.set_notify_port(listener.local_addr().expect("bound listener").port());
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_session_cookie, clear_session_cookie};
+
+    #[test]
+    fn secure_session_cookies_include_secure_attribute() {
+        let set = build_session_cookie("session-id", 7, true);
+        let clear = clear_session_cookie(true);
+
+        assert!(set.contains("; Secure"));
+        assert!(clear.contains("; Secure"));
+    }
+
+    #[test]
+    fn local_session_cookies_omit_secure_attribute() {
+        let set = build_session_cookie("session-id", 7, false);
+        let clear = clear_session_cookie(false);
+
+        assert!(!set.contains("; Secure"));
+        assert!(!clear.contains("; Secure"));
+    }
 }

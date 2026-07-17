@@ -13,6 +13,7 @@ services:
     environment:
       - DINOTTY_TOKEN=${DINOTTY_TOKEN:-}
       - DINOTTY_PORT=8999
+      - DINOTTY_COOKIE_SECURE=${DINOTTY_COOKIE_SECURE:-false}
       - RUST_LOG=${RUST_LOG:-info}
       - TZ=${TZ:-UTC}
 
