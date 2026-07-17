@@ -266,7 +266,7 @@ cargo run
 
 ## More Documentation
 
-- [Deployment Guide](docs/deployment.en.md) — systemd, Docker, Windows native run, cross-platform build, configuration
+- [Deployment Guide](docs/deployment.en.md) — systemd, Docker, GitHub Actions DevOps public deployment, cross-platform build, configuration
 - [Notification System](docs/notifications.en.md) — HTTP API, Claude Code integration, Open API
 - [Plugin System](docs/plugins.en.md) — installation, manifest, API, built-in plugins
 - [Plugin Development](docs/plugin-development.md) — full plugin development guide

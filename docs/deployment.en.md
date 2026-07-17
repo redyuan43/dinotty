@@ -9,6 +9,68 @@ Use the repository `Package` workflow (`.github/workflows/package.yml`) for rele
 - CI artifacts: `dinotty-macos` contains `.dmg`, `dinotty-linux` contains desktop `.deb` / `.AppImage` and the server `dinotty-server_*.deb`, and `dinotty-windows` contains the NSIS installer and portable `.exe`.
 - Artifact staging: CI copies packages to `dist/package-artifacts/` before upload. Manual-run artifacts are retained for 14 days by default.
 
+## Public Deployment From `dev`
+
+`dev` also has `.github/workflows/deploy-dev.yml`. This is the DevOps path for
+a long-running instance; it does not replace the `Package` workflow's release
+responsibilities:
+
+1. A GitHub-hosted runner builds the frontend and a static `dinotty-server` binary.
+2. The workflow packages the runtime Compose files, entrypoint, and binary into a
+   short-lived artifact.
+3. A runner labelled `self-hosted`, `linux`, `x64`, and `dinotty-prod` downloads
+   that artifact through a private SOCKS proxy.
+4. The self-hosted runner extracts it into `/opt/dinotty/app` and recreates
+   Dinotty with Docker Compose.
+5. The workflow waits for health checks and verifies that Dinotty has no published
+   host port while the reverse proxy can reach it on the private Docker network.
+
+Every push to `dev` starts this deployment. It can also be started manually from
+the `Deploy Dev` workflow in GitHub Actions. The artifact and repository never
+contain the Token, reverse-proxy password, SSH private keys, or workspace data.
+
+### One-Time Host Setup
+
+An administrator prepares the host once:
+
+- Install Docker Engine and the Docker Compose plugin.
+- Register a GitHub self-hosted runner with the `dinotty-prod` label.
+- Create `/opt/dinotty/.env` with at least `DINOTTY_TOKEN`, `WORKSPACE_DIR`,
+  `TZ`, and `DINOTTY_CADDY_NETWORK`. Keep it mode `0600` and out of Git.
+- Create the host workspace, for example `/opt/dinotty/workspace`.
+- Provide the reverse proxy's private Docker network and configure Caddy using
+  the pattern in `deploy/caddy/tmd.yuanspaces.com.Caddyfile`.
+- If the runner cannot reach GitHub directly, provide the local SOCKS proxy
+  currently expected at `127.0.0.1:17890`, or update the workflow's download
+  configuration to match the environment.
+
+The public instance must expose HTTPS only through Caddy. Do not restore a host
+port mapping such as `8999:8999`. Caddy credentials and the Dinotty Token are
+separate access layers and both should be strong random secrets.
+
+### Deploy, Verify, and Roll Back
+
+For routine releases, merge or push to `dev`, then confirm that the `Deploy Dev`
+build and deploy jobs succeed in GitHub Actions. The minimum post-deploy checks
+are:
+
+```bash
+docker inspect --format '{{.State.Health.Status}}' dinotty
+docker port dinotty
+docker exec <caddy-container> wget -qO- http://dinotty:8999/api/token-configured
+```
+
+The container should be `healthy`, `docker port dinotty` should print nothing,
+and the final request should include `"configured":true`. Then verify HTTPS,
+reverse-proxy authentication, the Dinotty Token login, and a WebSocket session
+from a browser.
+
+To roll back, revert the bad commit in Git and push `dev`, allowing the same
+workflow to deploy the known-good revision. Do not edit
+`/opt/dinotty/app/.deploy-artifacts` by hand because the next deployment
+overwrites it. The Token, workspace, Docker volume, and Caddy configuration are
+outside the artifact, so a code rollback does not reset persistent state.
+
 ## Local Script Scope
 
 `./scripts/build.sh` and `./scripts/build-linux-deb.sh` are only for temporary local builds, verification, or troubleshooting after changing code. Use the CI/CD flow above for deployment and releases.

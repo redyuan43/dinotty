@@ -266,7 +266,7 @@ cargo run
 
 ## 更多文档
 
-- [部署指南](docs/deployment.md) — systemd、Docker、Windows 原生运行、跨平台构建、配置说明
+- [部署指南](docs/deployment.md) — systemd、Docker、GitHub Actions DevOps 公网部署、跨平台构建、配置说明
 - [通知系统](docs/notifications.md) — HTTP API、Claude Code 集成、Open API
 - [插件系统](docs/plugins.md) — 安装、清单、API、内置插件
 - [插件开发](docs/plugin-development.md) — 完整的插件开发文档
