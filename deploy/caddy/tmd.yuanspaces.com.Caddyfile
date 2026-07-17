@@ -1,0 +1,29 @@
+# Add this site block to the existing Caddy configuration after the DNS A
+# record for tmd.yuanspaces.com points to the host.
+#
+# The Dinotty container shares Caddy's private Docker network and has no host
+# port mapping. Caddy reaches it by the `dinotty` network alias.
+tmd.yuanspaces.com {
+	encode zstd gzip
+
+	# Layer one is Caddy basic authentication. Dinotty's strong access token is
+	# the second, application-level gate. Replace the hash during deployment.
+	basic_auth {
+		ivan REPLACE_WITH_CADDY_BCRYPT_HASH
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+	}
+
+	reverse_proxy dinotty:8999 {
+		header_up -Authorization
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+	}
+}

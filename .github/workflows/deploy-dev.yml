@@ -1,0 +1,124 @@
+name: Deploy Dev
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: dinotty-dev-deploy
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build deployment bundle
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload-artifact.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Build static server binary
+        run: cargo build --release --target x86_64-unknown-linux-musl --package dinotty-server
+
+      - name: Assemble deployment bundle
+        run: |
+          set -euo pipefail
+          mkdir -p release/.deploy-artifacts release/deploy/docker
+          cp deploy/docker/.dockerignore release/.dockerignore
+          cp deploy/docker/docker-compose.yml release/deploy/docker/
+          cp deploy/docker/docker-compose.production.yml release/deploy/docker/
+          cp deploy/docker/Dockerfile.binary release/deploy/docker/
+          cp target/x86_64-unknown-linux-musl/release/dinotty-server \
+            release/.deploy-artifacts/dinotty-server
+          cp deploy/docker/entrypoint.sh release/.deploy-artifacts/entrypoint.sh
+          tar -C release -czf dinotty-deploy.tgz .
+
+      - uses: actions/upload-artifact@v4
+        id: upload-artifact
+        with:
+          name: dinotty-dev-deploy
+          path: dinotty-deploy.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy to yuanspaces-nexus
+    needs: build
+    runs-on: [self-hosted, linux, x64, dinotty-prod]
+    steps:
+      - name: Download deployment bundle through the private proxy
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HTTPS_PROXY: socks5h://127.0.0.1:17890
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/dinotty-deploy
+          mkdir -p /tmp/dinotty-deploy
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 600 \
+            --proxy "$HTTPS_PROXY" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            -o /tmp/dinotty-deploy/artifact.zip
+          unzip -q /tmp/dinotty-deploy/artifact.zip -d /tmp/dinotty-deploy
+          test -f /tmp/dinotty-deploy/dinotty-deploy.tgz
+
+      - name: Install and verify deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f /opt/dinotty/.env
+
+          rm -rf /opt/dinotty/app/.deploy-artifacts /opt/dinotty/app/deploy
+          tar -C /opt/dinotty/app -xzf /tmp/dinotty-deploy/dinotty-deploy.tgz
+          chmod 755 /opt/dinotty/app/.deploy-artifacts/dinotty-server
+
+          cd /opt/dinotty/app
+          docker compose --env-file /opt/dinotty/.env \
+            -f deploy/docker/docker-compose.yml \
+            -f deploy/docker/docker-compose.production.yml \
+            -p dinotty config -q
+          docker compose --env-file /opt/dinotty/.env \
+            -f deploy/docker/docker-compose.yml \
+            -f deploy/docker/docker-compose.production.yml \
+            -p dinotty up --build -d
+
+          for _ in $(seq 1 30); do
+            test "$(docker inspect --format '{{.State.Health.Status}}' dinotty)" = healthy && break
+            sleep 2
+          done
+
+          test "$(docker inspect --format '{{.State.Health.Status}}' dinotty)" = healthy
+          test -z "$(docker port dinotty)"
+          docker exec myownerim-caddy-1 wget -qO- http://dinotty:8999/api/token-configured \
+            | grep -q '"configured":true'

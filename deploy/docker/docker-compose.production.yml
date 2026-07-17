@@ -1,0 +1,17 @@
+services:
+  dinotty:
+    build:
+      dockerfile: deploy/docker/Dockerfile.binary
+    ports: !reset []
+    environment:
+      DINOTTY_COOKIE_SECURE: "true"
+    networks:
+      default: {}
+      caddy_public:
+        aliases:
+          - dinotty
+
+networks:
+  caddy_public:
+    external: true
+    name: ${DINOTTY_CADDY_NETWORK:-myownerim_public}
