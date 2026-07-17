@@ -49,7 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release/.deploy-artifacts release/deploy/docker
-          cp .dockerignore release/.dockerignore
+          cp deploy/docker/.dockerignore release/.dockerignore
           cp deploy/docker/docker-compose.yml release/deploy/docker/
           cp deploy/docker/docker-compose.production.yml release/deploy/docker/
           cp deploy/docker/Dockerfile.binary release/deploy/docker/
