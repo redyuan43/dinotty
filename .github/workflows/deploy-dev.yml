@@ -56,9 +56,9 @@ jobs:
           cp deploy/docker/docker-compose.yml release/deploy/docker/
           cp deploy/docker/docker-compose.production.yml release/deploy/docker/
           cp deploy/docker/Dockerfile.binary release/deploy/docker/
-          cp deploy/docker/entrypoint.sh release/deploy/docker/
           cp target/x86_64-unknown-linux-musl/release/dinotty-server \
             release/.deploy-artifacts/dinotty-server
+          cp deploy/docker/entrypoint.sh release/.deploy-artifacts/entrypoint.sh
           tar -C release -czf dinotty-deploy.tgz .
 
       - uses: actions/upload-artifact@v4

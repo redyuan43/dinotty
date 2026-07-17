@@ -18,7 +18,7 @@ RUN adduser -D -s /bin/bash -h /home/dinotty dinotty
 WORKDIR /home/dinotty
 
 COPY .deploy-artifacts/dinotty-server /usr/local/bin/dinotty-server
-COPY deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY .deploy-artifacts/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/dinotty-server /usr/local/bin/entrypoint.sh && \
     mkdir -p /home/dinotty/.dinotty/plugins && \
     chown -R dinotty:dinotty /home/dinotty
