@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -16,6 +17,8 @@ jobs:
   build:
     name: Build deployment bundle
     runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload-artifact.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,6 +62,7 @@ jobs:
           tar -C release -czf dinotty-deploy.tgz .
 
       - uses: actions/upload-artifact@v4
+        id: upload-artifact
         with:
           name: dinotty-dev-deploy
           path: dinotty-deploy.tgz
@@ -70,10 +74,23 @@ jobs:
     needs: build
     runs-on: [self-hosted, linux, x64, dinotty-prod]
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dinotty-dev-deploy
-          path: /tmp/dinotty-deploy
+      - name: Download deployment bundle through the private proxy
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HTTPS_PROXY: socks5h://127.0.0.1:17890
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/dinotty-deploy
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 600 \
+            --proxy "$HTTPS_PROXY" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            -o /tmp/dinotty-deploy/artifact.zip
+          unzip -q /tmp/dinotty-deploy/artifact.zip -d /tmp/dinotty-deploy
+          test -f /tmp/dinotty-deploy/dinotty-deploy.tgz
 
       - name: Install and verify deployment
         shell: bash

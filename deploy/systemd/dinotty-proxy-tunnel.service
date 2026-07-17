@@ -1,0 +1,14 @@
+[Unit]
+Description=Private proxy tunnel from Dinotty host to a trusted Tailscale peer
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/ssh -N -i /root/.ssh/nexus_ed25519 -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -L 127.0.0.1:17890:127.0.0.1:10808 ivan@100.90.114.26
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
