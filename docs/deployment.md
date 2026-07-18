@@ -22,7 +22,7 @@ DevOps 流程，不替代 `Package` 的正式发布职责：
 5. workflow 等待健康检查，并验证容器没有发布主机端口、反向代理私有网络可访问应用。
 
 推送到 `dev` 会自动触发部署；也可以在 GitHub Actions 中手动运行 `Deploy Dev`。
-它只部署当前 `dev` 提交，不会把 Token、反向代理密码、SSH 私钥或工作区数据打进
+它只部署当前 `dev` 提交，不会把 Token、SSH 私钥或工作区数据打进
 artifact 或提交到仓库。
 
 ### 首次准备
@@ -40,7 +40,8 @@ artifact 或提交到仓库。
   `127.0.0.1:17890`，或同步修改 workflow 中的下载配置。
 
 公网实例必须只让 Caddy 发布 HTTPS；不要在 Compose 中重新加入 `8999:8999` 之类
-的主机端口映射。Caddy 的账号密码和 Dinotty Token 是两层独立凭据，均应使用强随机值。
+的主机端口映射。浏览器访问由 Dinotty 的强随机 Token 认证；Caddy 负责 HTTPS、
+安全响应头和到私有 Docker 网络的反向代理，不应再要求重复输入 HTTP Basic Auth。
 
 ### 日常发布、验证与回滚
 
@@ -54,8 +55,7 @@ docker exec <caddy-container> wget -qO- http://dinotty:8999/api/token-configured
 ```
 
 预期结果是容器状态为 `healthy`、`docker port dinotty` 没有输出，且最后一个请求返回
-`"configured":true`。随后从浏览器验证 HTTPS、反向代理认证、Dinotty Token 登录和
-WebSocket 会话。
+`"configured":true`。随后从浏览器验证 HTTPS、Dinotty Token 登录和 WebSocket 会话。
 
 需要回滚时，优先在 Git 中 revert 有问题的提交并推送 `dev`，让同一 workflow 部署
 已知正确版本。不要手工修改 `/opt/dinotty/app/.deploy-artifacts`，因为下一次部署会
