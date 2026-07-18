@@ -27,7 +27,7 @@ responsibilities:
 
 Every push to `dev` starts this deployment. It can also be started manually from
 the `Deploy Dev` workflow in GitHub Actions. The artifact and repository never
-contain the Token, reverse-proxy password, SSH private keys, or workspace data.
+contain the Token, SSH private keys, or workspace data.
 
 ### One-Time Host Setup
 
@@ -45,8 +45,9 @@ An administrator prepares the host once:
   configuration to match the environment.
 
 The public instance must expose HTTPS only through Caddy. Do not restore a host
-port mapping such as `8999:8999`. Caddy credentials and the Dinotty Token are
-separate access layers and both should be strong random secrets.
+port mapping such as `8999:8999`. Browser access is authenticated by Dinotty's
+strong random Token. Caddy provides HTTPS, security headers, and reverse proxying
+to the private Docker network; it should not prompt for HTTP Basic Auth again.
 
 ### Deploy, Verify, and Roll Back
 
@@ -62,8 +63,7 @@ docker exec <caddy-container> wget -qO- http://dinotty:8999/api/token-configured
 
 The container should be `healthy`, `docker port dinotty` should print nothing,
 and the final request should include `"configured":true`. Then verify HTTPS,
-reverse-proxy authentication, the Dinotty Token login, and a WebSocket session
-from a browser.
+the Dinotty Token login, and a WebSocket session from a browser.
 
 To roll back, revert the bad commit in Git and push `dev`, allowing the same
 workflow to deploy the known-good revision. Do not edit

@@ -6,12 +6,6 @@
 tmd.yuanspaces.com {
 	encode zstd gzip
 
-	# Layer one is Caddy basic authentication. Dinotty's strong access token is
-	# the second, application-level gate. Replace the hash during deployment.
-	basic_auth {
-		ivan REPLACE_WITH_CADDY_BCRYPT_HASH
-	}
-
 	header {
 		-Server
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
