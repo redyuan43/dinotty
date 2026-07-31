@@ -5,6 +5,7 @@ const SAFE_SESSION_ID = /^[A-Za-z0-9._:-]{1,160}$/
 export interface CheckBoardsResumeIntent {
   sessionId: string
   deviceKey: string
+  hostname: string
   target: string
   cwd: string
 }
@@ -16,6 +17,7 @@ export function isValidCheckBoardsResumeIntent(value: unknown): value is CheckBo
     typeof intent.sessionId === 'string'
     && SAFE_SESSION_ID.test(intent.sessionId.trim())
     && typeof intent.deviceKey === 'string'
+    && typeof intent.hostname === 'string'
     && typeof intent.target === 'string'
     && typeof intent.cwd === 'string'
   )
@@ -29,6 +31,7 @@ export function parseCheckBoardsResumeIntent(search: string): CheckBoardsResumeI
   const intent = {
     sessionId,
     deviceKey: (params.get('device_key') || '').trim(),
+    hostname: (params.get('hostname') || '').trim(),
     target: (params.get('target') || '').trim(),
     cwd: (params.get('cwd') || '').trim(),
   }
@@ -41,6 +44,13 @@ export function resumeCommandFor(intent: CheckBoardsResumeIntent): string {
 
 function normalized(value: string | null | undefined): string {
   return String(value || '').trim().toLowerCase()
+}
+
+function profileIdentities(profile: SshProfile): string[] {
+  return [
+    normalized(profile.name).replace(/^tailscale\s*-\s*/, ''),
+    normalized(profile.host),
+  ]
 }
 
 function targetParts(target: string): { username: string; host: string; port: number | null } {
@@ -80,11 +90,12 @@ export function matchingSshProfiles(profiles: SshProfile[], intent: CheckBoardsR
     return exact.length ? exact : []
   }
 
-  const deviceMatches = intent.deviceKey
-    ? profiles.filter((profile) => (
-      normalized(profile.name) === normalized(intent.deviceKey)
-      || normalized(profile.host) === normalized(intent.deviceKey)
-    ))
+  const identityHints = [intent.deviceKey, intent.hostname].map(normalized).filter(Boolean)
+  const deviceMatches = identityHints.length
+    ? profiles.filter((profile) => {
+      const identities = profileIdentities(profile)
+      return identityHints.some((hint) => identities.includes(hint))
+    })
     : []
   const exact = samePort(sameUser(deviceMatches))
   return exact.length ? exact : deviceMatches

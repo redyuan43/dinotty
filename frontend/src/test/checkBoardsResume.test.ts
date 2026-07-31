@@ -10,11 +10,12 @@ import {
 describe('Check Boards resume intent', () => {
   it('parses and validates a deep link without accepting a raw command', () => {
     const intent = parseCheckBoardsResumeIntent(
-      '?check_boards_resume=1&session_id=019f79d3-f18b-72d1-aab3-b687b40f10d4&device_key=AMD&target=ivan%40amd.example&cwd=%2Fhome%2Fivan'
+      '?check_boards_resume=1&session_id=019f79d3-f18b-72d1-aab3-b687b40f10d4&device_key=AMD&hostname=ivan-SuperAI&target=ivan%40amd.example&cwd=%2Fhome%2Fivan'
     )
     expect(intent).toEqual({
       sessionId: '019f79d3-f18b-72d1-aab3-b687b40f10d4',
       deviceKey: 'AMD',
+      hostname: 'ivan-SuperAI',
       target: 'ivan@amd.example',
       cwd: '/home/ivan',
     })
@@ -23,6 +24,7 @@ describe('Check Boards resume intent', () => {
     expect(isValidCheckBoardsResumeIntent({
       sessionId: 'bad\rwhoami',
       deviceKey: 'AMD',
+      hostname: '',
       target: '',
       cwd: '',
     })).toBe(false)
@@ -33,7 +35,7 @@ describe('Check Boards resume intent', () => {
       { id: 'wrong', name: 'AMD', host: 'other.example', port: 22, username: 'ivan', auth_method: { type: 'key_file', key_path: '/tmp/key' } },
       { id: 'right', name: 'SuperAI', host: 'amd.example', port: 22, username: 'ivan', auth_method: { type: 'key_file', key_path: '/tmp/key' } },
     ] as any
-    const intent = parseCheckBoardsResumeIntent('?check_boards_resume=1&session_id=session-root-1&device_key=AMD&target=ivan%40amd.example')!
+    const intent = parseCheckBoardsResumeIntent('?check_boards_resume=1&session_id=session-root-1&device_key=AMD&hostname=ivan-SuperAI&target=ivan%40amd.example')!
     expect(matchingSshProfiles(profiles, intent).map((profile) => profile.id)).toEqual(['right'])
   })
 
@@ -50,7 +52,7 @@ describe('Check Boards resume intent', () => {
       { id: 'wrong-user', name: 'Other', host: 'amd.example', port: 22, username: 'root', auth_method: { type: 'key_file', key_path: '/tmp/key' } },
       { id: 'alias', name: 'AMD', host: 'amd-alias', port: 22, username: 'ivan', auth_method: { type: 'key_file', key_path: '/tmp/key' } },
     ] as any
-    const intent = parseCheckBoardsResumeIntent('?check_boards_resume=1&session_id=session-root-1&device_key=AMD&target=ivan%40amd.example')!
+    const intent = parseCheckBoardsResumeIntent('?check_boards_resume=1&session_id=session-root-1&device_key=AMD&hostname=ivan-SuperAI&target=ivan%40amd.example')!
     expect(matchingSshProfiles(profiles, intent)).toEqual([])
   })
 })
