@@ -98,8 +98,9 @@ export function useSyncWebSocket(opts: {
   persist: () => void
   focusActive: () => void
   newTab: () => Promise<void>
+  onTabListReady?: () => void
 }) {
-  const { termRefs, persist, focusActive, newTab } = opts
+  const { termRefs, persist, focusActive, newTab, onTabListReady } = opts
   const session = useSessionStore()
   const { tabs, activePaneId } = storeToRefs(session)
   const ui = useUiStore()
@@ -358,6 +359,7 @@ export function useSyncWebSocket(opts: {
 
         persist()
         nextTick(() => focusActive())
+        onTabListReady?.()
       } else if (msg.type === 'tab_created') {
         const existing = tabs.value.find((t) => {
           if (t.type !== 'terminal') return false

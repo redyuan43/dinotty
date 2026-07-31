@@ -204,6 +204,7 @@ const pwDialogPort = ref(22)
 const pwDialogUsername = ref('')
 const pwDialogName = ref('')
 let pendingProfile: SshProfile | null = null
+let afterConnect: ((result: CreateTabResult) => void | Promise<void>) | null = null
 
 // Retry tracking
 let lastAttempt: (() => Promise<void>) | null = null
@@ -293,7 +294,17 @@ function selectCurrent() {
   connectProfile(profiles[selectedIndex.value])
 }
 
-async function connectProfile(profile: SshProfile) {
+function notifyConnected(result: CreateTabResult) {
+  const callback = afterConnect
+  afterConnect = null
+  if (callback) {
+    void callback(result)
+  } else {
+    emit('connect', result)
+  }
+}
+
+async function connectProfile(profile: SshProfile, initialCwd?: string) {
   if (connecting.value) return
 
   // If password auth and password is empty, prompt for it
@@ -312,8 +323,8 @@ async function connectProfile(profile: SshProfile) {
   connecting.value = true
   error.value = ''
   try {
-    const result = await apiCreateSshTab(profile.id, undefined, abortController.signal)
-    emit('connect', result)
+    const result = await apiCreateSshTab(profile.id, initialCwd, abortController.signal)
+    notifyConnected(result)
     close()
   } catch (e: any) {
     if (e.name === 'AbortError') return
@@ -341,7 +352,7 @@ async function onPasswordConnect(password: string) {
       username: profile.username,
       auth: { type: 'password', password },
     }, abortController.signal)
-    emit('connect', result)
+    notifyConnected(result)
     close()
   } catch (e: any) {
     if (e.name === 'AbortError') return
@@ -392,7 +403,7 @@ async function quickConnect() {
       saveSettings()
     }
 
-    emit('connect', result)
+    notifyConnected(result)
     close()
   } catch (e: any) {
     if (e.name === 'AbortError') return
@@ -438,6 +449,19 @@ function open() {
 function close() {
   visible.value = false
   connecting.value = false
+  afterConnect = null
+}
+
+function connectProfileById(
+  profileId: string,
+  initialCwd?: string,
+  callback?: (result: CreateTabResult) => void | Promise<void>
+) {
+  const profile = (settings.ssh_profiles || []).find((item) => item.id === profileId)
+  if (!profile) return false
+  afterConnect = callback || null
+  void connectProfile(profile, initialCwd)
+  return true
 }
 
 function openNewDialog() {
@@ -499,7 +523,7 @@ function onDragEnd() {
   dropPos.value = null
 }
 
-defineExpose({ open, close })
+defineExpose({ open, close, connectProfileById })
 </script>
 
 <style scoped>

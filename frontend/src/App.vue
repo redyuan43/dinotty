@@ -376,6 +376,28 @@ import { shellEscapePath } from './utils/shell'
 import { buildRunCodeCommand } from './utils/runCodeCommand'
 import { resolveAbbr, resolveColor } from './utils/workspaceIcon'
 import { APP_ACTION_IDS } from './utils/appActionCatalog'
+import {
+  matchingSshProfiles,
+  matchingTerminalTab,
+  parseCheckBoardsResumeIntent,
+  resumeCommandFor,
+  isValidCheckBoardsResumeIntent,
+  type CheckBoardsResumeIntent,
+} from './utils/checkBoardsResume'
+
+const CHECK_BOARDS_RESUME_STORAGE_KEY = 'dinotty.check-boards-resume-intent'
+
+function captureCheckBoardsResumeIntent() {
+  const intent = parseCheckBoardsResumeIntent(window.location.search)
+  if (intent) {
+    sessionStorage.setItem(CHECK_BOARDS_RESUME_STORAGE_KEY, JSON.stringify(intent))
+    window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.hash}`)
+  } else if (new URLSearchParams(window.location.search).has('check_boards_resume')) {
+    window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.hash}`)
+  }
+}
+
+captureCheckBoardsResumeIntent()
 
 // ── Stores ──────────────────────────────────────────────────────
 const session = useSessionStore()
@@ -679,6 +701,7 @@ const syncWs = useSyncWebSocket({
   persist,
   focusActive,
   newTab: async () => { await newTab() },
+  onTabListReady: () => { void processCheckBoardsResumeIntent() },
 })
 
 const sshAuth = useSshAuth({ syncWs })
@@ -1025,6 +1048,65 @@ const { openPlugin } = usePluginLauncher({
 })
 
 onSshConnectRef.value = onSshConnect
+
+async function prefillCheckBoardsResume(paneId: string, intent: CheckBoardsResumeIntent) {
+  const command = resumeCommandFor(intent)
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await nextTick()
+    const terminal = termRefs[paneId]
+    if (terminal) {
+      terminal.sendData(command)
+      return
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 50))
+  }
+  toast.error('TMD 终端尚未准备好，恢复命令未能预填')
+}
+
+async function processCheckBoardsResumeIntent() {
+  const raw = sessionStorage.getItem(CHECK_BOARDS_RESUME_STORAGE_KEY)
+  if (!raw) return
+  sessionStorage.removeItem(CHECK_BOARDS_RESUME_STORAGE_KEY)
+
+  let intent: CheckBoardsResumeIntent
+  try {
+    const parsed = JSON.parse(raw)
+    if (!isValidCheckBoardsResumeIntent(parsed)) throw new Error('invalid intent')
+    intent = parsed
+  } catch {
+    toast.error('Check Boards 恢复请求格式无效')
+    return
+  }
+
+  const profiles = settingsStore.settings.ssh_profiles || []
+  const matches = matchingSshProfiles(profiles, intent)
+  if (matches.length !== 1) {
+    toast.error(matches.length ? '匹配到多个 SSH profile，请从 SSH 主机面板选择设备' : '没有找到匹配的 SSH profile')
+    sshPanelRef.value?.open()
+    return
+  }
+
+  const profile = matches[0]
+  const existing = matchingTerminalTab(tabs.value, profile.id)
+  if (existing && existing.type === 'terminal') {
+    activePaneId.value = existing.paneId
+    await prefillCheckBoardsResume(existing.activePaneId, intent)
+    return
+  }
+
+  const started = sshPanelRef.value?.connectProfileById(
+    profile.id,
+    intent.cwd || undefined,
+    async (result) => {
+      await onSshConnect(result)
+      await prefillCheckBoardsResume(result.pane_id, intent)
+    },
+  )
+  if (!started) {
+    toast.error('SSH profile 已不存在，请重新选择设备')
+    sshPanelRef.value?.open()
+  }
+}
 
 function onNewMenuAction(
   type:
@@ -1468,6 +1550,7 @@ onMounted(async () => {
           }
           persist()
           nextTick(() => focusActive())
+          void processCheckBoardsResumeIntent()
         } catch (e) {
           console.warn('[sync] REST fallback failed:', e)
         }
