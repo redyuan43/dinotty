@@ -38,7 +38,6 @@
         <div class="mc-right-panel">
           <div v-if="selectedWorkspacePath" class="mc-right-path">{{ selectedWorkspacePath }}</div>
           <TabOverview
-            v-if="filteredCards.length > 0"
             ref="tabOverviewRef"
             :visible="true"
             :cards="filteredCards"
@@ -48,15 +47,10 @@
             :embedded="true"
             @activate="(id: string) => $emit('activate', id)"
             @close-tab="(id: string) => $emit('close-tab', id)"
+            @close-tabs="(ids: string[]) => $emit('close-tabs', ids)"
             @rename-tab="onRenameTab"
+            @new-tab="onNewTabForSelected"
           />
-          <div v-else class="mc-ws-empty-panel">
-            <p class="mc-ws-empty-panel-text">{{ emptyPanelHint }}</p>
-            <button class="mc-ws-empty-panel-btn" @click="onNewTabForSelected">
-              <Plus :size="16" />
-              {{ t('workspace.newTerminal') }}
-            </button>
-          </div>
         </div>
       </Motion>
     </Motion>
@@ -72,8 +66,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { Motion, AnimatePresence } from 'motion-v'
-import { Plus, X } from 'lucide-vue-next'
-import { useWorkspaces } from '../../composables/useWorkspaces'
+import { X } from 'lucide-vue-next'
+import { DEFAULT_WORKSPACE_ID, useWorkspaces } from '../../composables/useWorkspaces'
 import { useI18n } from '../../composables/useI18n'
 import { uiConfirm } from '../../composables/useConfirm'
 import { useSessionStore } from '../../stores/sessionStore'
@@ -97,12 +91,20 @@ const emit = defineEmits<{
   close: []
   activate: [paneId: string]
   'close-tab': [paneId: string]
+  'close-tabs': [paneIds: string[]]
   'new-tab': [cwd?: string]
   'new-tab-ssh': [connectionId: string, initialCwd?: string]
   'rename-tab': [paneId: string, title: string]
 }>()
 
-const { workspaces, activeWorkspaceId, matchWorkspace, deleteWorkspace, activateWorkspace } = useWorkspaces()
+const {
+  workspaces,
+  defaultWorkspace,
+  activeWorkspaceId,
+  matchWorkspace,
+  deleteWorkspace,
+  activateWorkspace,
+} = useWorkspaces()
 const { t } = useI18n()
 const session = useSessionStore()
 const tabPreview = useTabPreview()
@@ -245,7 +247,9 @@ function onRenameTab(paneId: string, title: string) {
 }
 
 function onRenameWorkspace(id: string) {
-  const ws = workspaces.value.find((w) => w.id === id)
+  const ws = id === DEFAULT_WORKSPACE_ID
+    ? defaultWorkspace.value
+    : workspaces.value.find((w) => w.id === id)
   if (!ws) return
   renamingWorkspace.value = ws
 }
@@ -256,19 +260,9 @@ function onNewTab(cwd?: string) {
 
 const selectedWorkspacePath = computed(() => {
   const sel = selectedWorkspaceId.value
-  if (!sel || sel === '__all__') return null
+  if (!sel) return null
+  if (sel === '__all__') return defaultWorkspace.value.path || null
   return workspaces.value.find((w) => w.id === sel)?.path ?? null
-})
-
-const emptyPanelHint = computed(() => {
-  const sel = selectedWorkspaceId.value
-  if (sel === '__all__') {
-    return workspaces.value.length > 0
-      ? t('workspace.noUngrouped')
-      : t('workspace.firstUse')
-  }
-  const ws = workspaces.value.find((w) => w.id === sel)
-  return ws ? `${ws.name} — ${ws.path}` : ''
 })
 
 function onNewTabForSelected() {

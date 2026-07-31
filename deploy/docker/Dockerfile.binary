@@ -5,6 +5,11 @@
 # .deploy-artifacts/dinotty-server before building this image.
 FROM alpine:3.21
 
+ARG DINOTTY_REVISION=unknown
+ARG DINOTTY_BUILD_VERSION=unknown
+LABEL org.opencontainers.image.revision="${DINOTTY_REVISION}"
+LABEL org.opencontainers.image.version="${DINOTTY_BUILD_VERSION}"
+
 RUN apk add --no-cache \
     bash \
     zsh \

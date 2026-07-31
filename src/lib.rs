@@ -16,9 +16,11 @@
 )]
 
 pub mod agent;
+pub mod attention;
 pub mod audit;
 pub mod auth;
 pub mod event_bus;
+pub mod events;
 pub mod file_watcher;
 pub mod history;
 pub mod mcp;

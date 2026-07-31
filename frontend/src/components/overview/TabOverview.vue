@@ -5,7 +5,6 @@
       <Motion
         :key="cardsKey"
         class="mc-grid"
-        :style="gridStyle"
         :initial="{ opacity: 0, x: switchDirection === 'right' ? 20 : -20 }"
         :animate="{ opacity: 1, x: 0, transition: { duration: 0.18, ease: 'easeOut' } }"
         :exit="{ opacity: 0, transition: { duration: 0.1, ease: 'easeOut' } }"
@@ -51,6 +50,23 @@
           <pre v-else class="mc-card-text"></pre>
         </div>
         </Motion>
+        <Motion
+          :ref="(el: any) => setCardRef(cards.length, el)"
+          class="mc-card mc-card-add"
+          :class="{ focused: cards.length === focusedIndex }"
+          :initial="{ opacity: 0 }"
+          :animate="{ opacity: 1, transition: { duration: 0.12 } }"
+          :exit="{ opacity: 0, transition: { duration: 0.08 } }"
+          role="button"
+          :aria-label="t('keybinding.newTab')"
+          @click="$emit('new-tab')"
+          @mouseenter="focusedIndex = cards.length"
+        >
+          <div class="mc-card-header"></div>
+          <div class="mc-card-preview">
+            <Plus :size="32" />
+          </div>
+        </Motion>
       </Motion>
     </AnimatePresence>
   </template>
@@ -73,7 +89,6 @@
       <Motion
         key="card-grid"
         class="mc-grid"
-        :style="gridStyle"
         :initial="{ scale: 0.96, opacity: 0 }"
         :animate="{ scale: 1, opacity: 1, transition: { duration: 0.18, ease: 'easeOut' } }"
         :exit="{ scale: 0.96, opacity: 0, transition: { duration: 0.1, ease: 'easeOut' } }"
@@ -113,6 +128,23 @@
             <pre v-else class="mc-card-text"></pre>
           </div>
         </Motion>
+        <Motion
+          :ref="(el: any) => setCardRef(cards.length, el)"
+          class="mc-card mc-card-add"
+          :class="{ focused: cards.length === focusedIndex }"
+          :initial="{ opacity: 0 }"
+          :animate="{ opacity: 1, transition: { duration: 0.12 } }"
+          :exit="{ opacity: 0, transition: { duration: 0.08 } }"
+          role="button"
+          :aria-label="t('keybinding.newTab')"
+          @click="$emit('new-tab')"
+          @mouseenter="focusedIndex = cards.length"
+        >
+          <div class="mc-card-header"></div>
+          <div class="mc-card-preview">
+            <Plus :size="32" />
+          </div>
+        </Motion>
       </Motion>
     </Motion>
   </AnimatePresence>
@@ -128,11 +160,25 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { Motion, AnimatePresence } from 'motion-v'
-import { X, Puzzle, Pencil, Square } from 'lucide-vue-next'
+import {
+  X,
+  Puzzle,
+  Pencil,
+  Square,
+  Plus,
+  Layers,
+  ArrowLeftToLine,
+  ArrowRightToLine,
+} from 'lucide-vue-next'
 import type { TabCard, PanePreviewNode } from '../../composables/useTabPreview'
 import SplitPreviewNode from './SplitPreviewNode.vue'
 import ContextMenu from '../ui/ContextMenu.vue'
 import type { ContextMenuItem } from '../ui/ContextMenu.vue'
+import { useI18n } from '../../composables/useI18n'
+import { uiConfirm } from '../../composables/useConfirm'
+import { uiPrompt } from '../../composables/usePrompt'
+
+const { t } = useI18n()
 
 function isSplitPreview(content: string | PanePreviewNode): content is PanePreviewNode {
   return typeof content === 'object' && content !== null && 'direction' in content
@@ -157,7 +203,9 @@ const emit = defineEmits<{
   close: []
   activate: [paneId: string]
   'close-tab': [paneId: string]
+  'close-tabs': [paneIds: string[]]
   'rename-tab': [paneId: string, title: string]
+  'new-tab': []
 }>()
 
 // Context menu for tab cards
@@ -169,19 +217,81 @@ const ctxItems = ref<ContextMenuItem[]>([])
 function openCardCtx(e: MouseEvent, card: TabCard) {
   ctxX.value = e.clientX
   ctxY.value = e.clientY
+  const idx = props.cards.findIndex((c) => c.paneId === card.paneId)
+  const workspaceTabs = props.cards.filter((c) => c.type !== 'plugin')
+  const leftTabs = props.cards.slice(0, idx).filter((c) => c.type !== 'plugin')
+  const rightTabs = props.cards.slice(idx + 1).filter((c) => c.type !== 'plugin')
+  const closeWorkspaceLabel = t('overview.closeWorkspaceTabs')
+  const closeLeftLabel = t('overview.closeTabsLeft')
+  const closeRightLabel = t('overview.closeTabsRight')
+
+  async function confirmCloseTabs(label: string, targets: TabCard[]) {
+    const ok = await uiConfirm(
+      t('overview.confirmCloseTabs').replace('{count}', String(targets.length)),
+      {
+        title: label,
+        confirmText: t('overview.closeTabsConfirm'),
+        cancelText: t('filePreview.cancel'),
+      },
+    )
+    if (!ok) return
+    emit('close-tabs', targets.map((c) => c.paneId))
+  }
+
+  function currentSideTabs(side: 'left' | 'right'): TabCard[] | null {
+    const currentCards = props.cards
+    const currentIdx = currentCards.findIndex((c) => c.paneId === card.paneId)
+    if (currentIdx === -1) return null
+    const sideCards =
+      side === 'left' ? currentCards.slice(0, currentIdx) : currentCards.slice(currentIdx + 1)
+    return sideCards.filter((c) => c.type !== 'plugin')
+  }
+
   ctxItems.value = [
     {
-      label: 'Rename',
+      label: t('palette.rename'),
       icon: Pencil,
-      action: () => {
-        const name = prompt('Rename tab', card.title)
-        if (name !== null && name.trim()) {
+      action: async () => {
+        const name = await uiPrompt(t('palette.rename'), card.title, {
+          confirmText: t('settings.token.save'),
+          cancelText: t('confirm.closeWindowCancel'),
+        })
+        if (name && name.trim()) {
           emit('rename-tab', card.paneId, name.trim())
         }
       },
     },
     {
-      label: 'Close',
+      label: closeWorkspaceLabel,
+      icon: Layers,
+      disabled: workspaceTabs.length === 0,
+      action: () => confirmCloseTabs(
+        closeWorkspaceLabel,
+        props.cards.filter((c) => c.type !== 'plugin'),
+      ),
+    },
+    {
+      label: closeLeftLabel,
+      icon: ArrowLeftToLine,
+      disabled: leftTabs.length === 0,
+      action: () => {
+        const targets = currentSideTabs('left')
+        if (targets === null) return
+        void confirmCloseTabs(closeLeftLabel, targets)
+      },
+    },
+    {
+      label: closeRightLabel,
+      icon: ArrowRightToLine,
+      disabled: rightTabs.length === 0,
+      action: () => {
+        const targets = currentSideTabs('right')
+        if (targets === null) return
+        void confirmCloseTabs(closeRightLabel, targets)
+      },
+    },
+    {
+      label: t('overview.closeTab'),
       icon: Square,
       danger: true,
       action: () => emit('close-tab', card.paneId),
@@ -212,16 +322,6 @@ function getCols(): number {
   return COLS_SM
 }
 
-const gridStyle = computed(() => {
-  const n = props.cards.length || 1
-  return {
-    '--mc-rows': Math.ceil(n / COLS_SM),
-    '--mc-rows-md': Math.ceil(n / COLS_MD),
-    '--mc-rows-lg': Math.ceil(n / COLS_LG),
-    '--mc-rows-xl': Math.ceil(n / COLS_XL),
-  }
-})
-
 // Reset focused index when overlay opens; mark closing when overlay starts to dismiss
 watch(
   () => props.visible,
@@ -229,7 +329,8 @@ watch(
     if (v) {
       closing.value = false
       const idx = props.cards.findIndex((c) => c.paneId === props.activePaneId)
-      focusedIndex.value = idx >= 0 ? idx : 0
+      // Fall back to the "add" card so empty workspaces are still keyboard-actionable
+      focusedIndex.value = idx >= 0 ? idx : props.cards.length
       if (!props.embedded) {
         nextTick(() => backdropRef.value?.$el?.focus?.())
       }
@@ -243,12 +344,9 @@ watch(
 watch(
   () => props.cards,
   (cards) => {
-    if (!cards.length) {
-      focusedIndex.value = 0
-      return
-    }
-    // Clamp to valid range
-    if (focusedIndex.value >= cards.length) focusedIndex.value = cards.length - 1
+    // "add" card lives at index cards.length; only clamp when beyond that
+    if (focusedIndex.value > cards.length) focusedIndex.value = cards.length
+    if (!cards.length) return
     // Try to focus the active pane
     const idx = cards.findIndex((c) => c.paneId === props.activePaneId)
     if (idx >= 0) focusedIndex.value = idx
@@ -257,41 +355,67 @@ watch(
 )
 
 function onKeydown(e: KeyboardEvent) {
-  const len = props.cards.length
-  if (!len) return
-
+  // Total cells = cards + trailing "add" card
+  const tabCount = props.cards.length
+  const total = tabCount + 1
   const cols = getCols()
-  const rows = Math.ceil(len / cols)
   const cur = focusedIndex.value
-  const col = Math.floor(cur / rows)
-  const row = cur % rows
+  const row = Math.floor(cur / cols)
+  const col = cur % cols
+  const lastRow = Math.floor((total - 1) / cols)
 
   switch (e.key) {
     case 'ArrowUp':
       e.preventDefault()
-      focusedIndex.value = row > 0 ? cur - 1 : cur + rows - 1
+      if (row > 0) {
+        focusedIndex.value = cur - cols
+      } else {
+        // Wrap to last row, same col (clamp to last cell if col is out of range)
+        const target = lastRow * cols + col
+        focusedIndex.value = target < total ? target : total - 1
+      }
       break
     case 'ArrowDown':
       e.preventDefault()
-      focusedIndex.value = row < rows - 1 && cur + 1 < len ? cur + 1 : col * rows
+      if (row < lastRow) {
+        const target = cur + cols
+        focusedIndex.value = target < total ? target : total - 1
+      } else {
+        // Wrap to first row, same col
+        focusedIndex.value = col < total ? col : 0
+      }
       break
     case 'ArrowLeft':
       e.preventDefault()
       if (col > 0) {
-        const target = cur - rows
-        focusedIndex.value = target >= 0 ? target : 0
+        focusedIndex.value = cur - 1
+      } else if (row > 0) {
+        // Wrap to end of previous row
+        focusedIndex.value = row * cols - 1
+      } else {
+        // At the very first cell — wrap to last cell
+        focusedIndex.value = total - 1
       }
       break
     case 'ArrowRight':
       e.preventDefault()
-      if (col < cols - 1) {
-        const target = cur + rows
-        focusedIndex.value = target < len ? target : len - 1
+      if (col < cols - 1 && cur + 1 < total) {
+        focusedIndex.value = cur + 1
+      } else if (row < lastRow) {
+        // Wrap to start of next row
+        focusedIndex.value = (row + 1) * cols
+      } else {
+        // At the very last cell — wrap to first cell
+        focusedIndex.value = 0
       }
       break
     case 'Enter':
       e.preventDefault()
-      emit('activate', props.cards[cur].paneId)
+      if (cur < tabCount) {
+        emit('activate', props.cards[cur].paneId)
+      } else {
+        emit('new-tab')
+      }
       break
     case 'Escape':
       e.preventDefault()
@@ -311,8 +435,10 @@ defineExpose({
   focusedIndex,
   onKeydown,
   activateFocused() {
-    if (props.cards.length) {
+    if (focusedIndex.value < props.cards.length) {
       emit('activate', props.cards[focusedIndex.value].paneId)
+    } else {
+      emit('new-tab')
     }
   },
 })

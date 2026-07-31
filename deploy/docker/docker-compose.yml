@@ -3,7 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
-    image: dinotty:latest
+    image: ${DINOTTY_IMAGE:-dinotty:latest}
     container_name: dinotty
     restart: unless-stopped
 

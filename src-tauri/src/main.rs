@@ -18,6 +18,13 @@ mod embedded_server;
 
 static EMBEDDED_HTTP_PORT: OnceLock<u16> = OnceLock::new();
 static DESKTOP_SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
+const BUILT_IN_DEFAULT_PORT: u16 = 8999;
+
+fn default_port() -> u16 {
+    option_env!("DINOTTY_DEFAULT_PORT")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(BUILT_IN_DEFAULT_PORT)
+}
 
 #[derive(Clone, Serialize)]
 struct PtyOutput {
@@ -156,7 +163,7 @@ fn spawn_tauri_write_task(session: Arc<dinotty_server::session::Session>, pane_i
                 write_session.write_input_async(batch.as_bytes()).await
             } else {
                 let ws = Arc::clone(&write_session);
-                tokio::task::spawn_blocking(move || ws.write_input_sync(batch.as_bytes()))
+                tokio::task::spawn_blocking(move || ws.write_input_blocking(batch.as_bytes()))
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()))
             };
@@ -229,7 +236,7 @@ fn pty_spawn(
     }
 
     let (session, shell_type) =
-        pty::create_session(&manager, &pane_id, None, Some(Arc::clone(&exit_cb)), None)?;
+        pty::create_session(&manager, &pane_id, None, Some(Arc::clone(&exit_cb)), None, None)?;
 
     spawn_tauri_output_forwarder(app.clone(), pane_id.clone(), Arc::clone(&session));
     spawn_tauri_write_task(Arc::clone(&session), pane_id.clone());
@@ -358,7 +365,7 @@ fn pty_detach(pane_id: String, state: State<'_, Arc<SessionManager>>) -> Result<
 
 #[tauri::command]
 fn embedded_http_origin() -> String {
-    let port = EMBEDDED_HTTP_PORT.get().copied().unwrap_or(8999);
+    let port = EMBEDDED_HTTP_PORT.get().copied().unwrap_or_else(default_port);
     format!("http://127.0.0.1:{port}")
 }
 
@@ -463,7 +470,7 @@ async fn pick_workspace_dir(base: Option<String>) -> Option<String> {
                 Some(std::path::PathBuf::from(base))
             }
         })
-        .and_then(|path| path.canonicalize().ok())
+        .and_then(|path| path.canonicalize().ok().map(|c| dunce::simplified(&c).to_path_buf()))
         .filter(|path| path.is_dir())
         .or_else(|| {
             std::env::var_os("HOME").map(std::path::PathBuf::from).filter(|path| path.is_dir())
@@ -482,7 +489,7 @@ async fn tauri_upload(
     cwd: Option<String>,
     token: Option<String>,
 ) -> Result<FetchResponse, String> {
-    let port = EMBEDDED_HTTP_PORT.get().copied().unwrap_or(8999);
+    let port = EMBEDDED_HTTP_PORT.get().copied().unwrap_or_else(default_port);
     let mut url = format!(
         "http://127.0.0.1:{port}/api/workspace/upload?pane_id={}&dir={}",
         urlencoding::encode(&pane_id),
@@ -585,11 +592,65 @@ fn close_window(app: AppHandle, state: State<'_, Arc<SessionManager>>) {
     quit_desktop_app(&app, state.inner().as_ref());
 }
 
+/// macOS-specific: GUI-launched apps inherit LaunchServices' minimal PATH, so
+/// argv tabs (e.g. `claude --resume`) fail to spawn. Import the user's
+/// login-shell PATH once at startup, before any PTY spawn or thread exists.
+#[cfg(target_os = "macos")]
+fn import_login_shell_path() {
+    use dinotty_server::platform::process::CommandNoWindowExt;
+
+    const START_MARKER: &[u8] = b"__DINOTTY_PATH_START__";
+    const END_MARKER: &[u8] = b"__DINOTTY_PATH_END__";
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let Ok(out) = std::process::Command::new(&shell)
+        .no_window()
+        .args(["-lc", "printf '__DINOTTY_PATH_START__%s__DINOTTY_PATH_END__' \"$PATH\""])
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+
+    let Some(start) =
+        out.stdout.windows(START_MARKER.len()).position(|window| window == START_MARKER)
+    else {
+        return;
+    };
+    let value_start = start + START_MARKER.len();
+    let Some(end) =
+        out.stdout[value_start..].windows(END_MARKER.len()).position(|window| window == END_MARKER)
+    else {
+        return;
+    };
+
+    if let Ok(path) = std::str::from_utf8(&out.stdout[value_start..value_start + end]) {
+        let path = path.trim();
+        if !path.is_empty() {
+            std::env::set_var("PATH", path);
+        }
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "macos")]
+    import_login_shell_path();
     let _log_guard = dinotty_server::settings::init_logging();
 
     let args: Vec<String> = std::env::args().collect();
-    let port = parse_port(&args);
+    let requested_port = parse_port(&args);
+    let port = if requested_port == 0 {
+        let port = match default_port() {
+            0 => BUILT_IN_DEFAULT_PORT,
+            port => port,
+        };
+        tracing::warn!("Port 0 is not supported; falling back to default port {port}");
+        port
+    } else {
+        requested_port
+    };
     let _ = EMBEDDED_HTTP_PORT.set(port);
 
     let manager = Arc::new(SessionManager::new());
@@ -600,6 +661,9 @@ fn main() {
         rt.block_on(async move {
             let listener = embedded_server::bind_listener(port)
                 .unwrap_or_else(|e| panic!("failed to bind embedded server on port {port}: {e}"));
+            // The reaper must run unconditionally — a bind failure or notifier-registration
+            // ordering issue must never suppress it. Notification GC simply no-ops until
+            // run_server registers a notifier.
             mgr.start_cleanup_task();
             embedded_server::run_server(listener, mgr).await
         });
@@ -767,15 +831,15 @@ fn parse_port(args: &[String]) -> u16 {
         match args[i].as_str() {
             "--port" | "-p" => {
                 if let Some(v) = args.get(i + 1) {
-                    return v.parse().unwrap_or(8999);
+                    return v.parse().unwrap_or_else(|_| default_port());
                 }
             }
             s if s.starts_with("--port=") => {
-                return s[7..].parse().unwrap_or(8999);
+                return s[7..].parse().unwrap_or_else(|_| default_port());
             }
             _ => {}
         }
         i += 1;
     }
-    8999
+    default_port()
 }

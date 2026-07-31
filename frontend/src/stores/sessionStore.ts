@@ -1,8 +1,11 @@
 import { defineStore } from 'pinia'
 import { ref, computed, nextTick } from 'vue'
 import type { Tab, TerminalTab, PluginTab } from '../types/pane'
+import type { Workspace } from '../types/workspace'
 import type { TabInfo } from '../components/terminal/TabBar.vue'
 import { findLeaf, findFirstLeaf, getAllLeaves } from '../types/pane'
+import { DEFAULT_WORKSPACE_ID, useWorkspaces } from '../composables/useWorkspaces'
+import { resolveAbbr, resolveColor } from '../utils/workspaceIcon'
 
 export const useSessionStore = defineStore('session', () => {
   // ── State ──────────────────────────────────────────────
@@ -15,18 +18,50 @@ export const useSessionStore = defineStore('session', () => {
   /** Currently active tab (or undefined) */
   const activeTab = computed(() => tabs.value.find((t) => t.paneId === activePaneId.value))
 
+  const { workspaces, defaultWorkspace, matchWorkspace } = useWorkspaces()
+
+  function buildWorkspace(ws: Workspace): TabInfo['workspace'] {
+    const fallback = Array.from(ws.name).slice(0, 3).join('')
+    const isDefault = ws.id === DEFAULT_WORKSPACE_ID
+    return {
+      id: ws.id,
+      abbr: isDefault ? resolveAbbr(ws) : ws.abbr || fallback || undefined,
+      name: ws.name,
+      color: isDefault ? resolveColor(ws) : ws.color,
+      remote: !!ws.connection_id,
+    }
+  }
+
+  function visibleWorkspaceBadge(ws: Workspace): TabInfo['workspace'] {
+    return ws.id === DEFAULT_WORKSPACE_ID && ws.tab_badge === false
+      ? undefined
+      : buildWorkspace(ws)
+  }
+
   /** Tab list for TabBar component */
   const tabList = computed<TabInfo[]>(() =>
-    tabs.value.map((t, i) => ({
-      paneId: t.paneId,
-      title:
-        t.type === 'terminal'
-          ? (t.customTitle ?? findLeaf(t.layout, t.activePaneId)?.title ?? 'Terminal')
-          : t.title,
-      index: i + 1,
-      type: t.type,
-      shellType: t.type === 'terminal' ? findLeaf(t.layout, t.activePaneId)?.shell_type : undefined,
-    }))
+    tabs.value.map((t, i) => {
+      const info: TabInfo = {
+        paneId: t.paneId,
+        title:
+          t.type === 'terminal'
+            ? (t.customTitle ?? findLeaf(t.layout, t.activePaneId)?.title ?? 'Terminal')
+            : t.title,
+        index: i + 1,
+        type: t.type,
+        shellType: t.type === 'terminal' ? findLeaf(t.layout, t.activePaneId)?.shell_type : undefined,
+      }
+      if (t.type === 'terminal') {
+        const ws = matchWorkspace(t.cwd ?? '', t.connectionId, t.workspaceId) ?? defaultWorkspace.value
+        info.workspace = visibleWorkspaceBadge(ws)
+      } else {
+        const ws = t.workspaceId
+          ? workspaces.value.find((w) => w.id === t.workspaceId)
+          : defaultWorkspace.value
+        if (ws) info.workspace = visibleWorkspaceBadge(ws)
+      }
+      return info
+    })
   )
 
   /** Type of the currently active tab */

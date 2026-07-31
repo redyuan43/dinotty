@@ -1,7 +1,8 @@
-import { ref, computed, type Ref } from 'vue'
+import { ref, computed, nextTick, type Ref } from 'vue'
 import { copyToClipboard } from '../utils/clipboard'
 import { uiConfirm } from './useConfirm'
 import type { DirEntry } from '../components/workspace/TreeRows'
+import { isRunnableCodeFile } from '../utils/runCodeCommand'
 
 interface Meta {
   kind: string
@@ -35,6 +36,7 @@ export function useTreeContextMenu(opts: {
   onSelectDir: (rel: string) => void
   triggerUpload: () => void
   downloadFile: (rel: string) => Promise<void>
+  paneId: () => string
   t: (key: string) => string
 }) {
   const contextMenu = ref<{ x: number; y: number; rel: string; isDir: boolean } | null>(null)
@@ -47,6 +49,18 @@ export function useTreeContextMenu(opts: {
       ? '⌘⌫'
       : 'Del'
   )
+
+  const canRunCode = computed(function computeCanRunCode() {
+    // 步骤1：读取当前右键目标，背景菜单则使用已选文件。
+    const menu = contextMenu.value
+    if (!menu) return false
+    const targetRel = menu.rel || opts.selectedRel.value
+    const targetIsDir = menu.rel ? menu.isDir : opts.selectedIsDir.value
+
+    // 步骤2：仅对可直接运行的文件显示入口。
+    if (!targetRel || targetIsDir) return false
+    return isRunnableCodeFile(targetRel)
+  })
 
   const contextMenuStyle = computed(() => {
     const m = contextMenu.value
@@ -178,7 +192,7 @@ export function useTreeContextMenu(opts: {
 
   function ctxUpload() {
     closeContextMenu()
-    opts.triggerUpload()
+    nextTick(() => opts.triggerUpload())
   }
 
   async function ctxDownload() {
@@ -189,6 +203,18 @@ export function useTreeContextMenu(opts: {
     const targetRel = rel || opts.selectedRel.value
     if (!targetRel) return
     await opts.downloadFile(targetRel)
+  }
+
+  async function ctxReveal() {
+    if (!contextMenu.value) return
+    const { rel } = contextMenu.value
+    closeContextMenu()
+    const targetRel = rel || opts.selectedRel.value
+    if (!targetRel) return
+    const { getApiBase, apiUrl, authFetch } = await import('./apiBase')
+    await getApiBase()
+    const q = new URLSearchParams({ pane_id: opts.paneId(), path: targetRel })
+    await authFetch(apiUrl(`/api/workspace/reveal?${q}`), { method: 'GET' })
   }
 
   function ctxCopyPath() {
@@ -208,6 +234,23 @@ export function useTreeContextMenu(opts: {
     if (!targetRel) return
     window.dispatchEvent(
       new CustomEvent('terminal-insert-path', {
+        detail: { path: opts.absolutePath(targetRel) },
+      })
+    )
+  }
+
+  function ctxRunCode() {
+    // 步骤1：读取右键文件并立即关闭菜单。
+    if (!contextMenu.value) return
+    const { rel, isDir } = contextMenu.value
+    closeContextMenu()
+    const targetRel = rel || opts.selectedRel.value
+    const targetIsDir = rel ? isDir : opts.selectedIsDir.value
+
+    // 步骤2：仅发送支持运行的文件绝对路径。
+    if (!targetRel || targetIsDir || !isRunnableCodeFile(targetRel)) return
+    window.dispatchEvent(
+      new CustomEvent('terminal-run-code', {
         detail: { path: opts.absolutePath(targetRel) },
       })
     )
@@ -265,6 +308,7 @@ export function useTreeContextMenu(opts: {
     moveConfirm,
     deleteConfirm,
     ctxDeleteKeyHint,
+    canRunCode,
     contextMenuStyle,
     closeContextMenu,
     shouldBlockNavigate,
@@ -281,6 +325,8 @@ export function useTreeContextMenu(opts: {
     ctxDownload,
     ctxCopyPath,
     ctxInsertToTerminal,
+    ctxRunCode,
+    ctxReveal,
     onMoveEntry,
     onMoveConfirm,
     onMoveCancel,

@@ -15,10 +15,11 @@ use std::sync::Arc;
 
 use dinotty_server::auth;
 use dinotty_server::auth::session::SessionStore;
+use dinotty_server::events;
 use dinotty_server::file_watcher::{self, FileWatcherState};
 use dinotty_server::history;
 use dinotty_server::history::HistoryState;
-use dinotty_server::monitor::{self, MonitorState};
+use dinotty_server::monitor::MonitorState;
 use dinotty_server::notification::{self, NotificationBroadcast};
 use dinotty_server::platform::process::CommandNoWindowExt;
 use dinotty_server::plugin::{self, PluginManager, PluginManagerState};
@@ -89,6 +90,12 @@ impl axum::extract::FromRef<AppState> for MonitorState {
 impl axum::extract::FromRef<AppState> for Arc<NotificationBroadcast> {
     fn from_ref(state: &AppState) -> Self {
         state.notifier.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for (Arc<NotificationBroadcast>, Arc<SessionManager>) {
+    fn from_ref(state: &AppState) -> Self {
+        (state.notifier.clone(), state.manager.clone())
     }
 }
 
@@ -319,11 +326,9 @@ async fn check_auth(
             .into_response();
     }
     let session_id = state.sessions.create(Some(real_ip), None);
-    let cookie = format!(
-        "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800",
-        auth::SESSION_COOKIE_NAME,
-        session_id
-    );
+    let cookie_name = auth::session_cookie_name(state.port);
+    let cookie =
+        format!("{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800", cookie_name, session_id);
     (
         StatusCode::OK,
         [(header::SET_COOKIE, axum::http::HeaderValue::from_str(&cookie).unwrap())],
@@ -341,17 +346,17 @@ async fn logout(
     AxumState(state): AxumState<AppState>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
+    let cookie_name = auth::session_cookie_name(state.port);
     if let Some(cookie_header) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
         for pair in cookie_header.split(';') {
             let pair = pair.trim();
-            if let Some(sid) = pair.strip_prefix(&format!("{}=", auth::SESSION_COOKIE_NAME)) {
+            if let Some(sid) = pair.strip_prefix(&format!("{cookie_name}=")) {
                 let _ = state.sessions.revoke(sid);
                 break;
             }
         }
     }
-    let clear_cookie =
-        format!("{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0", auth::SESSION_COOKIE_NAME);
+    let clear_cookie = format!("{cookie_name}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
     (
         [(header::SET_COOKIE, axum::http::HeaderValue::from_str(&clear_cookie).unwrap())],
         StatusCode::OK,
@@ -455,6 +460,14 @@ impl Drop for NotifyPortGuard {
     }
 }
 
+struct PluginProcessGuard(Arc<PluginManager>);
+
+impl Drop for PluginProcessGuard {
+    fn drop(&mut self) {
+        self.0.request_shutdown_all();
+    }
+}
+
 pub fn run_server(
     listener: std::net::TcpListener,
     manager: Arc<SessionManager>,
@@ -476,16 +489,37 @@ pub fn run_server(
             }
         };
         let local_port = listener.local_addr().expect("bound listener").port();
+        auth::set_session_cookie_port(local_port);
         manager.set_notify_port(local_port);
-        let monitor_state = MonitorState::new();
+        let monitor_state = MonitorState::new(Arc::clone(&manager.sync_clients));
         monitor_state.clone().start_collector();
 
-        let notifier = Arc::new(NotificationBroadcast::new());
+        let notifier = Arc::new(NotificationBroadcast::new(Arc::clone(&manager.sync_clients)));
         let settings_state = settings::create_settings_state();
         notifier.set_settings(settings_state.clone());
-        let history_state = HistoryState::new();
-        let plugins = Arc::new(PluginManager::new());
+        // Registering the notifier is independent of starting the reaper: a bind failure or
+        // startup-ordering issue here must never suppress the detached-session reaper itself
+        // (mirrors src/main.rs server wiring).
+        manager.register_notifier(Arc::clone(&notifier));
+        {
+            let notifier = Arc::clone(&notifier);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(notification::SWEEP_INTERVAL);
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    notifier.sweep(notification::now_ms());
+                }
+            });
+        }
+        let history_state = HistoryState::new(Arc::clone(&manager.sync_clients));
+        let git_info = read_git_info();
+        let plugins = Arc::new(PluginManager::new(
+            format!("http://127.0.0.1:{local_port}"),
+            "desktop".into(),
+        ));
         plugins.scan();
+        let _plugin_process_guard = PluginProcessGuard(Arc::clone(&plugins));
 
         let initial_token = settings::load_token()
             .or_else(|| std::env::var("DINOTTY_TOKEN").ok())
@@ -502,8 +536,6 @@ pub fn run_server(
             initial_token
         };
         let auth_token = Arc::new(tokio::sync::RwLock::new(initial_token));
-
-        let git_info = read_git_info();
 
         let session_ttl_days = settings::load_settings().auth.session_ttl_days;
         let sessions = Arc::new(SessionStore::new(session_ttl_days));
@@ -532,9 +564,6 @@ pub fn run_server(
             .route("/ws", get(ws::ws_handler))
             .route("/ws/sync", get(ws::sync_handler))
             .route("/ws/watch", get(file_watcher::watch_handler))
-            .route("/ws/monitor", get(monitor::ws_monitor_handler))
-            .route("/ws/notify", get(ws::notification_ws_handler))
-            .route("/ws/history", get(history::ws_history_handler))
             // Tab/Pane management
             .route("/api/tabs", get(tabs::list_tabs).post(tabs::create_tab))
             // SSH tab routes (must be before :tab_id routes)
@@ -542,6 +571,12 @@ pub fn run_server(
             .route("/api/tabs/ssh", post(tabs::create_ssh_tab))
             .route("/api/tabs/:tab_id", delete(tabs::close_tab))
             .route("/api/tabs/:tab_id/pane", post(tabs::split_pane))
+            .route("/api/tabs/:tab_id/pane/plugin", post(tabs::create_plugin_pane))
+            .route("/api/tabs/:tab_id/pane/files", post(tabs::create_files_pane))
+            .route("/api/tabs/:tab_id/pane/web", post(tabs::create_web_pane))
+            .route("/api/tabs/:tab_id/pane/move", post(tabs::move_pane))
+            .route("/api/tabs/extract", post(tabs::extract_pane))
+            .route("/api/tabs/plugin", post(tabs::create_plugin_tab))
             .route("/api/tabs/:tab_id/pane/:pane_id", delete(tabs::close_pane))
             .route("/api/tabs/:tab_id/pane/:pane_id/activate", put(tabs::activate_pane))
             .route("/api/tabs/:tab_id/layout", put(tabs::update_layout))
@@ -591,6 +626,7 @@ pub fn run_server(
             .route("/api/workspaces/:id/activate", put(workspace_mgmt::activate_workspace))
             .route("/api/workspaces/active", delete(workspace_mgmt::deactivate_workspace))
             .route("/api/notify", post(notification::post_notify))
+            .route("/api/events/emit", post(events::emit_event))
             .route("/api/history", get(history::get_history).delete(history::delete_history))
             .route("/api/info", get(server_info))
             .route("/api/auth", post(check_auth))
@@ -605,6 +641,7 @@ pub fn run_server(
             .route("/api/plugins/market", get(plugin::get_market_registry))
             .route("/api/plugins/market/:id/readme", get(plugin::get_market_readme))
             .route("/api/plugins/dev-link", post(plugin::dev_link_plugin))
+            .route("/api/plugins/install-dir", post(plugin::install_from_dir))
             .merge(
                 Router::new()
                     .route("/api/plugins/install", post(plugin::install_plugin))
@@ -628,6 +665,8 @@ pub fn run_server(
                     .put(plugin::plugin_storage_set)
                     .delete(plugin::plugin_storage_delete),
             )
+            .route("/api/plugins/:id/crypto/hash", post(plugin::plugin_crypto_hash))
+            .route("/api/plugins/:id/crypto/hmac", post(plugin::plugin_crypto_hmac))
             .route("/api/plugins/:id/*path", get(plugin::plugin_asset))
             .route("/api/proxy", any(proxy::external_proxy_handler))
             .route("/preview/:port", any(proxy::proxy_handler_root))
@@ -664,8 +703,16 @@ pub fn run_server(
                         .get::<axum::extract::ConnectInfo<SocketAddr>>()
                         .map(|ci| ci.ip())
                         .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
-                    auth::auth_middleware(req, next, &token, &s.settings, &s.sessions, client_ip)
-                        .await
+                    auth::auth_middleware(
+                        req,
+                        next,
+                        &token,
+                        &s.settings,
+                        &s.sessions,
+                        client_ip,
+                        s.port,
+                    )
+                    .await
                 },
             ))
             .layer(middleware::from_fn(

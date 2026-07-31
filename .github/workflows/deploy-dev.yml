@@ -65,6 +65,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
         with:
@@ -90,9 +91,16 @@ jobs:
           pnpm run build
 
       - name: Build static server binary
-        run: cargo build --release --target x86_64-unknown-linux-musl --package dinotty-server
+        env:
+          REVISION: ${{ needs.resolve.outputs.sha }}
+        run: |
+          short_revision="${REVISION:0:12}"
+          export DINOTTY_BUILD_VERSION="0.19.0+redyuan.${short_revision}"
+          cargo build --release --target x86_64-unknown-linux-musl --package dinotty-server
 
       - name: Assemble deployment bundle
+        env:
+          REVISION: ${{ needs.resolve.outputs.sha }}
         run: |
           set -euo pipefail
           mkdir -p release/.deploy-artifacts release/deploy/docker
@@ -100,10 +108,14 @@ jobs:
           cp deploy/docker/docker-compose.yml release/deploy/docker/
           cp deploy/docker/docker-compose.production.yml release/deploy/docker/
           cp deploy/docker/Dockerfile.binary release/deploy/docker/
+          cp deploy/docker/promote-release.sh release/deploy/docker/
           cp target/x86_64-unknown-linux-musl/release/dinotty-server \
             release/.deploy-artifacts/dinotty-server
           cp deploy/docker/entrypoint.sh release/.deploy-artifacts/entrypoint.sh
-          printf '%s\n' '${{ needs.resolve.outputs.sha }}' > release/REVISION
+          short_revision="${REVISION:0:12}"
+          printf '%s\n' "$REVISION" > release/REVISION
+          printf '0.19.0+redyuan.%s\n' "$short_revision" > release/BUILD_VERSION
+          chmod 755 release/deploy/docker/promote-release.sh
           tar -C release -czf dinotty-deploy.tgz .
 
       - uses: actions/upload-artifact@v4
@@ -142,28 +154,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f /opt/dinotty/.env
-
-          rm -rf /opt/dinotty/app/.deploy-artifacts /opt/dinotty/app/deploy
-          tar -C /opt/dinotty/app -xzf /tmp/dinotty-deploy/dinotty-deploy.tgz
-          chmod 755 /opt/dinotty/app/.deploy-artifacts/dinotty-server
-
-          cd /opt/dinotty/app
-          docker compose --env-file /opt/dinotty/.env \
-            -f deploy/docker/docker-compose.yml \
-            -f deploy/docker/docker-compose.production.yml \
-            -p dinotty config -q
-          docker compose --env-file /opt/dinotty/.env \
-            -f deploy/docker/docker-compose.yml \
-            -f deploy/docker/docker-compose.production.yml \
-            -p dinotty up --build -d
-
-          for _ in $(seq 1 30); do
-            test "$(docker inspect --format '{{.State.Health.Status}}' dinotty)" = healthy && break
-            sleep 2
-          done
-
-          test "$(docker inspect --format '{{.State.Health.Status}}' dinotty)" = healthy
-          test -z "$(docker port dinotty)"
-          docker exec myownerim-caddy-1 wget -qO- http://dinotty:8999/api/token-configured \
-            | grep -q '"configured":true'
+          rm -rf /tmp/dinotty-deploy/release
+          mkdir -p /tmp/dinotty-deploy/release
+          tar -C /tmp/dinotty-deploy/release \
+            -xzf /tmp/dinotty-deploy/dinotty-deploy.tgz
+          /tmp/dinotty-deploy/release/deploy/docker/promote-release.sh \
+            /tmp/dinotty-deploy/release

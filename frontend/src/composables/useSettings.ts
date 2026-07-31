@@ -1,4 +1,4 @@
-import { reactive } from 'vue'
+import { reactive, readonly, ref } from 'vue'
 import { applyThemeToDOM, getXtermTheme } from '../themes'
 import { getApiBase, apiUrl, authFetch, hasAuthToken } from './apiBase'
 import { resolveEffectiveTheme } from './useDeviceThemeSelection'
@@ -8,6 +8,8 @@ import OpencodeLogo from '../components/icons/OpencodeLogo.vue'
 import { isWindowsClient } from '../utils/clientPlatform'
 import type { KeyBinding } from './useKeybindings'
 import type { SavedTheme } from './useDeviceThemeSelection'
+export type WorkspaceBadgeMode = 'off' | 'tab' | 'icon' | 'both'
+
 export interface SettingsData {
   theme: {
     preset: string
@@ -33,15 +35,24 @@ export interface SettingsData {
   recent_files: RecentEntry[]
   recent_urls: RecentEntry[]
   action_keyboard: ActionKeyboardConfig | null
+  action_keyboard_user_default?: ActionKeyboardConfig | null
+  toolbar_quick_keys: ActionKey[]
   upload_dir: string
   default_base_dir?: string | null
   default_workspace_root?: string | null
+  default_workspace_name?: string | null
+  default_workspace_abbr?: string | null
+  default_workspace_color?: string | null
+  default_workspace_tab_badge?: boolean | null
   upload_cap_mb: number
   upload_file_cap_mb: number
   upload_cap_count: number
   keyboard_sound: boolean
   show_virtual_keyboard: boolean
+  keyboard_keep_on_scroll: boolean
+  workspace_badge_mode: WorkspaceBadgeMode | null
   confirm_before_close_tab: boolean
+  reload_after_supervise_tabs: boolean
   space_confirms_dialogs: boolean
   windowsAltAsCmd: boolean
   locale: string
@@ -84,6 +95,7 @@ export interface NotificationConfig {
   enabled: boolean
   bell: { enabled: boolean; debounce_ms: number }
   osc_notify: boolean
+  idle_reminder: boolean
   command_complete: { enabled: boolean; threshold_seconds: number }
   keyword_match: { pattern: string; notification_type: string; case_sensitive: boolean }[]
   channels: {
@@ -110,6 +122,7 @@ export interface MonitorConfig {
   disk: boolean
   network: boolean
   gpu: boolean
+  plugin_series: Record<string, boolean>
 }
 
 export interface TextConfig {
@@ -172,8 +185,12 @@ export interface RecentEntry {
 
 export interface ActionKey {
   label: string
-  send: string
+  kind?: 'send' | 'action'
+  action?: string
+  display?: 'icon' | 'text'
+  send?: string
   style?: string
+  shape?: 'arrow' | 'button'
   repeat?: boolean
   special?: string
   auto_enter?: boolean
@@ -181,11 +198,32 @@ export interface ActionKey {
   icon?: object
 }
 
-export interface ActionKeyboardConfig {
+export interface ActionBottomCluster {
   rows: ActionKey[][]
+  enter: ActionKey
+  enter_width?: number
 }
 
-export const DEFAULT_ACTION_KEYBOARD: ActionKeyboardConfig = {
+export interface ActionKeyboardConfig {
+  rows: ActionKey[][]
+  bottom?: ActionBottomCluster
+}
+
+export const DEFAULT_ACTION_BOTTOM: ActionBottomCluster = {
+  rows: [
+    [ { label: 'yes',      send: 'yes\r',      grow: 1, shape: 'button' },
+      { label: 'no',       send: 'no\r',       grow: 1, shape: 'button' },
+      { label: '↑',        send: '\x1b[A', repeat: true, grow: 1, shape: 'arrow' } ],
+    [ { label: 'continue', send: 'continue\r', grow: 2, shape: 'button' },
+      { label: '↓',        send: '\x1b[B', repeat: true, grow: 1, shape: 'arrow' } ],
+  ],
+  enter: { label: '↵', kind: 'send', send: '\r' },
+  enter_width: 0.28,
+}
+
+export const DEFAULT_ACTION_KEYBOARD: ActionKeyboardConfig & {
+  rows: (ActionKey & { send: string })[][]
+} = {
   rows: [
     [
       { label: '🔖', send: '', special: 'bookmarks' },
@@ -207,6 +245,115 @@ export const DEFAULT_ACTION_KEYBOARD: ActionKeyboardConfig = {
       { label: '/model', send: '/model', auto_enter: true },
     ],
   ],
+  bottom: DEFAULT_ACTION_BOTTOM,
+}
+
+function normalizeActionKey(key: ActionKey): void {
+  if (key.grow !== undefined) {
+    if (!Number.isFinite(key.grow)) delete key.grow
+    else key.grow = Math.min(12, Math.max(0.5, key.grow))
+  }
+
+  if (typeof key.kind === 'string' && key.kind !== 'send' && key.kind !== 'action') {
+    key.kind = 'send'
+  }
+
+  if (key.display !== 'icon' && key.display !== 'text') delete key.display
+
+  if (key.shape !== 'arrow' && key.shape !== 'button') delete key.shape
+
+  if (key.kind !== 'action' || typeof key.action !== 'string' || key.action.trim() === '') return
+  delete key.send
+  delete key.special
+  delete key.repeat
+  delete key.auto_enter
+  delete key.icon
+}
+
+export function normalizeActionKeyboard(
+  cfg: ActionKeyboardConfig | null,
+): ActionKeyboardConfig | null {
+  if (cfg === null) return null
+
+  for (const row of cfg.rows) {
+    for (const key of row) normalizeActionKey(key)
+  }
+
+  const bottom = cfg.bottom
+  if (!bottom) return cfg
+
+  for (const row of bottom.rows) {
+    for (const key of row) normalizeActionKey(key)
+  }
+
+  if (bottom.enter) normalizeActionKey(bottom.enter)
+  if (!bottom.enter || bottom.enter.kind !== 'send' || bottom.enter.send !== '\r') {
+    const label = typeof bottom.enter?.label === 'string' && bottom.enter.label.trim() !== ''
+      ? bottom.enter.label
+      : DEFAULT_ACTION_BOTTOM.enter.label
+    bottom.enter = { ...DEFAULT_ACTION_BOTTOM.enter, label }
+  }
+
+  if (bottom.enter_width !== undefined) {
+    if (!Number.isFinite(bottom.enter_width)) delete bottom.enter_width
+    else bottom.enter_width = Math.min(0.5, Math.max(0.15, bottom.enter_width))
+  }
+
+  return cfg
+}
+
+function cloneActionKeyWithoutIcon(key: ActionKey): ActionKey {
+  const clone = { ...key }
+  delete clone.icon
+  return clone
+}
+
+export function cloneWithoutIcons(cfg: ActionKeyboardConfig): ActionKeyboardConfig {
+  const clone: ActionKeyboardConfig = {
+    ...cfg,
+    rows: cfg.rows.map((row) => row.map(cloneActionKeyWithoutIcon)),
+  }
+  if (cfg.bottom) {
+    clone.bottom = {
+      ...cfg.bottom,
+      rows: cfg.bottom.rows.map((row) => row.map(cloneActionKeyWithoutIcon)),
+      enter: cloneActionKeyWithoutIcon(cfg.bottom.enter),
+    }
+  }
+  return clone
+}
+
+export function effectiveActionKeyboard(): ActionKeyboardConfig {
+  const cfg = settings.action_keyboard
+  if (!cfg) return DEFAULT_ACTION_KEYBOARD
+  return { rows: cfg.rows ?? [], bottom: cfg.bottom ?? DEFAULT_ACTION_BOTTOM }
+}
+
+export function saveActionKeyboardUserDefault(): void {
+  settings.action_keyboard_user_default = cloneWithoutIcons(effectiveActionKeyboard())
+}
+
+export function restoreActionKeyboardUserDefault(): void {
+  const snapshot = settings.action_keyboard_user_default
+  if (!snapshot) return
+  settings.action_keyboard = cloneWithoutIcons(snapshot)
+  restoreActionIcons()
+}
+
+export function resetActionKeyboard(): void {
+  settings.action_keyboard = null
+}
+
+export function ensureBottom(): ActionBottomCluster {
+  if (!settings.action_keyboard) {
+    settings.action_keyboard = {
+      rows: DEFAULT_ACTION_KEYBOARD.rows.map((row) => row.map((key) => ({ ...key }))),
+    }
+  }
+  if (!settings.action_keyboard.bottom) {
+    settings.action_keyboard.bottom = structuredClone(DEFAULT_ACTION_BOTTOM)
+  }
+  return settings.action_keyboard.bottom
 }
 
 export const settings = reactive<SettingsData>({
@@ -233,13 +380,18 @@ export const settings = reactive<SettingsData>({
   recent_files: [],
   recent_urls: [],
   action_keyboard: null,
+  action_keyboard_user_default: null,
+  toolbar_quick_keys: [],
   upload_dir: '',
   upload_cap_mb: 200,
   upload_file_cap_mb: 0,
   upload_cap_count: 100,
   keyboard_sound: false,
   show_virtual_keyboard: false,
+  keyboard_keep_on_scroll: false,
+  workspace_badge_mode: null,
   confirm_before_close_tab: true,
+  reload_after_supervise_tabs: false,
   space_confirms_dialogs: false,
   windowsAltAsCmd: isWindowsClient,
   locale: 'zh',
@@ -251,11 +403,13 @@ export const settings = reactive<SettingsData>({
     disk: false,
     network: true,
     gpu: true,
+    plugin_series: {},
   },
   notification: {
     enabled: true,
     bell: { enabled: true, debounce_ms: 300 },
     osc_notify: true,
+    idle_reminder: false,
     command_complete: { enabled: false, threshold_seconds: 10 },
     keyword_match: [],
     channels: {
@@ -302,59 +456,118 @@ export const settings = reactive<SettingsData>({
 
 let loaded = false
 let loadPromise: Promise<void> | null = null
+let loadGeneration = 0
+let loadsInFlight = 0
+let loadedNotificationPresentationEcho: {
+  channels?: unknown
+  sounds?: unknown
+} | null = null
+const settingsLoadedState = ref(false)
+export const settingsLoaded = readonly(settingsLoadedState)
+
+export function __setSettingsLoadedForTest(value: boolean) {
+  settingsLoadedState.value = value
+}
+
+export function __resetSettingsLoadStateForTest() {
+  loaded = false
+  loadPromise = null
+  loadGeneration = 0
+  loadsInFlight = 0
+  loadedNotificationPresentationEcho = null
+  settingsLoadedState.value = false
+}
+
+export function currentLoadGeneration(): number {
+  return loadGeneration
+}
+
+export function isLoadInFlight(): boolean {
+  return loadsInFlight > 0
+}
 
 export function useSettings() {
   if (!loaded) {
     loadPromise = loadSettings()
     loaded = true
   }
-  return { settings, saveSettings, loadSettings, applyCurrentTheme, getCurrentXtermTheme }
+  return {
+    settings,
+    settingsLoaded,
+    saveSettings,
+    loadSettings,
+    applyCurrentTheme,
+    getCurrentXtermTheme,
+  }
 }
 
-function restoreActionIcons() {
-  const cfg = settings.action_keyboard
-  if (!cfg?.rows) return
+export function restoreActionIcons() {
+  // Toolbar quick keys are plain user-defined labels/sends; do not attach default icons.
   // Build a lookup from send → icon using DEFAULT_ACTION_KEYBOARD
   const iconMap = new Map<string, object>()
   for (const row of DEFAULT_ACTION_KEYBOARD.rows) {
     for (const k of row) {
-      if (k.icon) iconMap.set(k.send, k.icon)
+      if (k.icon && k.send !== undefined) iconMap.set(k.send, k.icon)
     }
   }
-  for (const row of cfg.rows) {
-    for (const k of row) {
-      if (!k.icon) {
-        const icon = iconMap.get(k.send)
-        if (icon) k.icon = icon
+
+  const restoreKey = (k: ActionKey) => {
+    if (k.kind === 'action' || k.icon || k.send === undefined) return
+    const icon = iconMap.get(k.send)
+    if (icon) k.icon = icon
+  }
+  const restoreConfig = (cfg: ActionKeyboardConfig | null | undefined) => {
+    if (!cfg) return
+    for (const row of cfg.rows) {
+      for (const k of row) restoreKey(k)
+    }
+    if (cfg.bottom) {
+      for (const row of cfg.bottom.rows) {
+        for (const k of row) restoreKey(k)
       }
+      if (cfg.bottom.enter) restoreKey(cfg.bottom.enter)
     }
   }
+
+  restoreConfig(settings.action_keyboard)
+  restoreConfig(settings.action_keyboard_user_default)
 }
 
-function syncActionKeyboardStorage() {
-  if (typeof localStorage === 'undefined') return
-  if (settings.action_keyboard) {
-    localStorage.setItem('dinotty_action_keyboard', JSON.stringify(settings.action_keyboard))
-  } else {
-    localStorage.removeItem('dinotty_action_keyboard')
-  }
-}
-
-async function loadSettings() {
+export async function loadSettings() {
   if (!hasAuthToken()) return
+  let requestStarted = false
   try {
+    loadGeneration++
+    loadsInFlight++
+    requestStarted = true
     await getApiBase()
     const res = await authFetch(apiUrl('/api/settings'))
     if (res.ok) {
       const data = await res.json()
+      const notification = data?.notification as Record<string, unknown> | undefined
+      if (notification) notification.idle_reminder = notification.idle_reminder === true
+      loadedNotificationPresentationEcho = {
+        ...(notification && Object.prototype.hasOwnProperty.call(notification, 'channels')
+          ? { channels: JSON.parse(JSON.stringify(notification.channels)) }
+          : {}),
+        ...(notification && Object.prototype.hasOwnProperty.call(notification, 'sounds')
+          ? { sounds: JSON.parse(JSON.stringify(notification.sounds)) }
+          : {}),
+      }
       Object.assign(settings, data)
+      loadGeneration++
+      settings.action_keyboard = normalizeActionKeyboard(settings.action_keyboard)
+      settings.action_keyboard_user_default = normalizeActionKeyboard(
+        settings.action_keyboard_user_default ?? null,
+      )
       restoreActionIcons()
       applyCurrentTheme()
-      // Sync action keyboard to localStorage for static mobile-keyboard.js
-      syncActionKeyboardStorage()
+      settingsLoadedState.value = true
     }
   } catch (e) {
     console.error('[settings] load failed:', e)
+  } finally {
+    if (requestStarted) loadsInFlight = Math.max(0, loadsInFlight - 1)
   }
 }
 
@@ -362,13 +575,42 @@ export async function saveSettings() {
   try {
     // Wait for initial load to complete before saving, to avoid overwriting server data with defaults
     if (loadPromise) await loadPromise
-    // Sync action keyboard to localStorage for static mobile-keyboard.js
-    syncActionKeyboardStorage()
+    // A save before any successful settings load would strip the server-owned
+    // notification.channels/sounds; the server's full-overwrite PUT (#[serde(default)])
+    // would then reset them to defaults across every device. Defer until a load has
+    // established the presentation echo.
+    if (!loadedNotificationPresentationEcho) {
+      console.warn('[settings] save skipped: settings have not loaded yet')
+      return
+    }
+    const payload = JSON.parse(JSON.stringify(settings)) as SettingsData
+    if (payload.action_keyboard) {
+      payload.action_keyboard = cloneWithoutIcons(payload.action_keyboard)
+    }
+    if (payload.action_keyboard_user_default) {
+      payload.action_keyboard_user_default = cloneWithoutIcons(payload.action_keyboard_user_default)
+    }
+    delete (payload as unknown as Record<string, unknown>).reload_after_supervise_tabs
+    const notification = payload.notification as unknown as Record<string, unknown>
+    for (const key of [
+      'presentation_enabled', 'channels', 'sounds', 'dnd_level', 'ignore_current_tab',
+      'quiet_hours', 'coalesce_window_ms',
+    ]) {
+      delete notification[key]
+    }
+    if (loadedNotificationPresentationEcho) {
+      if (Object.prototype.hasOwnProperty.call(loadedNotificationPresentationEcho, 'channels')) {
+        notification.channels = JSON.parse(JSON.stringify(loadedNotificationPresentationEcho.channels))
+      }
+      if (Object.prototype.hasOwnProperty.call(loadedNotificationPresentationEcho, 'sounds')) {
+        notification.sounds = JSON.parse(JSON.stringify(loadedNotificationPresentationEcho.sounds))
+      }
+    }
     await getApiBase()
     const res = await authFetch(apiUrl('/api/settings'), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings),
+      body: JSON.stringify(payload),
     })
     if (!res.ok) {
       console.error('[settings] save failed:', res.status, await res.text())

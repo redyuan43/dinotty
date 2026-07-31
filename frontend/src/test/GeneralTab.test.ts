@@ -16,7 +16,7 @@ vi.mock('../composables/apiBase', () => ({
   setAuthToken: () => {},
   getApiBase: async () => 'http://127.0.0.1:7681',
   fetchServerToken: async () => '',
-  hasAuthToken: () => false,
+  hasAuthToken: () => true,
 }))
 
 vi.mock('../composables/useTransport', () => ({
@@ -39,17 +39,22 @@ vi.mock('../utils/clipboard', () => ({
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import GeneralTab from '../components/settings/GeneralTab.vue'
-import { settings } from '../composables/useSettings'
+import {
+  __resetSettingsLoadStateForTest,
+  loadSettings,
+  settings,
+} from '../composables/useSettings'
 
 // Spec: openspec/changes/confirm-before-close-tab/spec.md
 //   "### Requirement: Setting UI In General Settings"
 // GeneralTab must expose a toggle bound to settings.confirm_before_close_tab.
 
 describe('GeneralTab - confirm-before-close-tab toggle', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     // Reset the shared reactive settings to the documented default.
     settings.confirm_before_close_tab = true
     settings.space_confirms_dialogs = false
+    settings.workspace_badge_mode = null
     settings.upload_dir = ''
     generalMocks.uploadStatus = 200
     generalMocks.defaultDir = '/tmp/dinotty'
@@ -69,6 +74,8 @@ describe('GeneralTab - confirm-before-close-tab toggle', () => {
       if (url === '/api/settings' && init?.method === 'PUT') return response({})
       return response({})
     })
+    __resetSettingsLoadStateForTest()
+    await loadSettings()
   })
 
   it('renders a toggle input bound to settings.confirm_before_close_tab', () => {
@@ -162,6 +169,29 @@ describe('GeneralTab - confirm-before-close-tab toggle', () => {
     expect(putCall).toBeDefined()
     expect(JSON.parse(putCall![1]!.body as string)).toMatchObject({
       space_confirms_dialogs: true,
+    })
+  })
+
+  it('renders and persists the four workspace badge modes', async () => {
+    const wrapper = mount(GeneralTab)
+    const control = wrapper.find('[data-setting="workspace-badge-mode"]')
+
+    expect(control.exists()).toBe(true)
+    const buttons = control.findAll('button')
+    expect(buttons).toHaveLength(4)
+    expect(buttons.every((button) => button.text().trim().length > 0)).toBe(true)
+    expect(buttons[0].attributes('aria-checked')).toBe('true')
+
+    await buttons[3].trigger('click')
+    await flush()
+
+    expect(settings.workspace_badge_mode).toBe('both')
+    const putCall = generalMocks.authFetch.mock.calls.find(
+      ([url, init]) => url === '/api/settings' && init?.method === 'PUT'
+    )
+    expect(putCall).toBeDefined()
+    expect(JSON.parse(putCall![1]!.body as string)).toMatchObject({
+      workspace_badge_mode: 'both',
     })
   })
 
