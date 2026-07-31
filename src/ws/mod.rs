@@ -33,8 +33,13 @@ pub struct WsQuery {
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
-    Input { data: String },
-    Resize { cols: u16, rows: u16 },
+    Input {
+        data: String,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     /// Client → server: request a snapshot at the client's final fit size.
     /// Server replies with ReplayBegin → scrollback+snapshot chunks → ReplayEnd,
     /// and applies PTY resize to (cols, rows) atomically with the snapshot.
@@ -42,7 +47,10 @@ pub enum ClientMsg {
     /// stale session.size immediately on connect, which the client's fit-
     /// ladder could interrupt mid-write and cause absolute-row addressing
     /// to clamp/wrap to wrong dimensions.
-    SnapshotRequest { cols: u16, rows: u16 },
+    SnapshotRequest {
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[derive(Deserialize, Debug)]
@@ -107,7 +115,10 @@ pub enum ServerMsg<'a> {
     /// ladder / ResizeObserver / peer-follow cannot interrupt mid-write.
     /// Cols/rows carry the dimensions the snapshot was encoded at — client
     /// compares to its current wrapper size and re-requests on mismatch.
-    ReplayBegin { cols: u16, rows: u16 },
+    ReplayBegin {
+        cols: u16,
+        rows: u16,
+    },
     ReplayEnd,
     SessionExit,
     /// SSH keyboard-interactive 认证提示
@@ -818,9 +829,8 @@ async fn handle_socket(
                     session.resize_debounced(client_id, cols, rows);
                 }
                 Ok(ClientMsg::SnapshotRequest { cols, rows }) => {
-                    if let Err(e) = session
-                        .atomic_resize_and_snapshot_for_client(client_id, cols, rows)
-                        .await
+                    if let Err(e) =
+                        session.atomic_resize_and_snapshot_for_client(client_id, cols, rows).await
                     {
                         warn!("snapshot_request failed: {e}, pane={}", pane_id);
                     }

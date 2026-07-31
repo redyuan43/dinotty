@@ -1,9 +1,16 @@
 name: Deploy Dev
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [dev]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA or branch with a successful CI run
+        required: true
+        default: dev
 
 permissions:
   actions: read
@@ -14,13 +21,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  resolve:
+    name: Resolve CI-verified revision
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.revision.outputs.sha }}
+    steps:
+      - name: Resolve and verify revision
+        id: revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
+          MANUAL_REF: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            sha="$AUTOMATIC_SHA"
+          else
+            sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${MANUAL_REF}" --jq .sha)"
+          fi
+          test -n "$sha"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${sha}&status=completed&per_page=100" \
+            | jq -e '
+                [.workflow_runs[]
+                  | select(.name == "CI" and .conclusion == "success")]
+                | length > 0
+              ' >/dev/null
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build deployment bundle
+    needs: resolve
     runs-on: ubuntu-latest
     outputs:
       artifact-id: ${{ steps.upload-artifact.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - uses: pnpm/action-setup@v4
         with:
@@ -59,19 +103,20 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/dinotty-server \
             release/.deploy-artifacts/dinotty-server
           cp deploy/docker/entrypoint.sh release/.deploy-artifacts/entrypoint.sh
+          printf '%s\n' '${{ needs.resolve.outputs.sha }}' > release/REVISION
           tar -C release -czf dinotty-deploy.tgz .
 
       - uses: actions/upload-artifact@v4
         id: upload-artifact
         with:
-          name: dinotty-dev-deploy
+          name: dinotty-dev-deploy-${{ needs.resolve.outputs.sha }}
           path: dinotty-deploy.tgz
           if-no-files-found: error
           retention-days: 7
 
   deploy:
     name: Deploy to yuanspaces-nexus
-    needs: build
+    needs: [resolve, build]
     runs-on: [self-hosted, linux, x64, dinotty-prod]
     steps:
       - name: Download deployment bundle through the private proxy
