@@ -18,7 +18,7 @@ use std::time::Duration;
 /// Notification protocol version stamped on every `Bell`/`Notify`/`ResyncRequired`
 /// envelope. The frontend dispatch uses this to detect protocol mismatches.
 pub const MIN_PROTOCOL_VERSION: u64 = 1;
-pub const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+pub const SWEEP_INTERVAL: Duration = Duration::from_mins(1);
 
 pub use broadcast::NotificationBroadcast;
 pub use handler::post_notify;
