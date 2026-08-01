@@ -4,7 +4,7 @@ pub mod sftp;
 use crate::event_bus::BusEvent;
 use crate::session::{
     CwdState, PendingSshAuth, Session, SessionBackend, SessionManager, SessionStatus,
-    SshAuthPrompt, SshCmd, SshSessionParams, SyncMsg,
+    SshAuthPrompt, SshCmd, SshSessionParams, SshWriteAck, SyncMsg,
 };
 use crate::settings::SshAuthMethod;
 use crate::vt_screen::VirtualScreen;
@@ -700,6 +700,39 @@ async fn ssh_reader_task(
                             break;
                         }
                     }
+                    Some(SshCmd::InputConfirmed { data, ready, commit, ack }) => {
+                        if ready.send(()).is_err() {
+                            continue;
+                        }
+                        if !matches!(
+                            tokio::time::timeout(Duration::from_secs(10), commit).await,
+                            Ok(Ok(()))
+                        ) {
+                            let _ = ack.send(SshWriteAck::Failed(
+                                "SSH confirmed write was not committed".into(),
+                            ));
+                            continue;
+                        }
+                        let cursor = std::io::Cursor::new(data);
+                        match tokio::time::timeout(Duration::from_secs(10), channel.data(cursor)).await
+                        {
+                            Ok(Ok(())) => {
+                                let _ = ack.send(SshWriteAck::Delivered);
+                            }
+                            Ok(Err(error)) => {
+                                let _ = ack.send(SshWriteAck::Failed(error.to_string()));
+                                error!("Confirmed SSH write failed, pane={}", pane_id);
+                                break;
+                            }
+                            Err(_) => {
+                                let _ = ack.send(SshWriteAck::Unknown(
+                                    "SSH channel write timed out after commit".into(),
+                                ));
+                                error!("Confirmed SSH write timed out, pane={}", pane_id);
+                                break;
+                            }
+                        }
+                    }
                     Some(SshCmd::Resize(cols, rows)) => {
                         debug!("SSH window_change: {cols}x{rows}, pane={pane_id}");
                         if let Err(e) = channel.window_change(u32::from(cols), u32::from(rows), 0, 0).await {
@@ -719,7 +752,7 @@ async fn ssh_reader_task(
     *session.ssh_cmd_tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 
     if session.notify_exit_and_mark_exited(&pane_id) {
-        manager.sessions.remove(&pane_id);
+        manager.remove_exited_session(&pane_id);
         manager.pane_closed_notify(&pane_id);
         manager
             .event_bus

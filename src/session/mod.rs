@@ -3,14 +3,16 @@ mod cwd;
 mod layout;
 mod manager;
 
-pub use backend::{PendingSshAuth, SessionBackend, SshAuthPrompt, SshCmd, SshSessionParams};
+pub use backend::{
+    PendingSshAuth, SessionBackend, SshAuthPrompt, SshCmd, SshSessionParams, SshWriteAck,
+};
 pub use cwd::CwdState;
 pub use layout::{
     collect_leaf_pane_ids, collect_terminal_leaf_pane_ids, ensure_leaf_kind,
     extract_leaf_from_layout, first_leaf_id, insert_pane_into_layout,
     insert_pane_into_layout_with_info, insert_subtree_into_layout, remove_pane_from_layout,
 };
-pub use manager::{SessionManager, SessionStatus, SyncClient, SyncMsg, TabInfo};
+pub use manager::{ResumeTabState, SessionManager, SessionStatus, SyncClient, SyncMsg, TabInfo};
 
 #[cfg(test)]
 pub(crate) use cwd::{find_subslice, parse_title_cwd, sniff_cwd_from_title_osc, OSC_SNIFF_CAP};
@@ -418,6 +420,51 @@ impl Session {
             SessionBackend::Exited => return Err("session exited".into()),
         }
         Ok(())
+    }
+
+    /// Writes input and waits until the SSH channel accepts or rejects it.
+    ///
+    /// # Errors
+    /// Returns an error if the SSH channel write fails or the writer task exits.
+    pub async fn write_input_confirmed(&self, data: &[u8]) -> Result<SshWriteAck, String> {
+        if !self.is_ssh() {
+            self.write_input_async(data).await?;
+            return Ok(SshWriteAck::Delivered);
+        }
+        let confirm_timeout = std::time::Duration::from_secs(10);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        let tx = self
+            .ssh_cmd_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "SSH session not initialized".to_string())?;
+        tx.send(SshCmd::InputConfirmed {
+            data: data.to_vec(),
+            ready: ready_tx,
+            commit: commit_rx,
+            ack: ack_tx,
+        })
+        .map_err(|_| "SSH cmd channel closed".to_string())?;
+        tokio::time::timeout(confirm_timeout, ready_rx)
+            .await
+            .map_err(|_| "SSH writer did not become ready before timeout".to_string())?
+            .map_err(|_| "SSH writer task closed before ready".to_string())?;
+        commit_tx.send(()).map_err(|()| "SSH writer task closed before commit".to_string())?;
+        match tokio::time::timeout(confirm_timeout + confirm_timeout, ack_rx).await {
+            Ok(Ok(SshWriteAck::Delivered)) => Ok(SshWriteAck::Delivered),
+            Ok(Ok(SshWriteAck::Unknown(message))) => Ok(SshWriteAck::Unknown(message)),
+            Ok(Ok(SshWriteAck::Failed(message))) => Err(message),
+            Ok(Err(_)) => Ok(SshWriteAck::Unknown(
+                "SSH writer closed after command commit without acknowledgement".into(),
+            )),
+            Err(_) => Ok(SshWriteAck::Unknown(
+                "SSH command was committed but delivery acknowledgement timed out".into(),
+            )),
+        }
     }
 
     /// Debounced resize: coalesces rapid calls (e.g. window drag) and applies

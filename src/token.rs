@@ -86,12 +86,27 @@ impl TokenInfo {
             None => true, // no scope restriction = allowed
         }
     }
+
+    #[must_use]
+    pub fn check_required_scope(&self, cap: &str, resource: &str) -> bool {
+        // The global token is the explicit super-administrator credential.
+        // Dedicated agent tokens must carry a matching resource scope.
+        if self.is_global {
+            return true;
+        }
+        self.capabilities.contains(cap)
+            && self
+                .scopes
+                .get(cap)
+                .is_some_and(|scopes| scopes.iter().any(|scope| scope == resource))
+    }
 }
 
 pub const ALL_CAPABILITIES: &[&str] = &[
     "terminal:read",
     "terminal:write",
     "terminal:create",
+    "terminal:resume",
     "terminal:kill",
     "workspace:read",
     "workspace:write",
@@ -623,5 +638,29 @@ mod tests {
         info.scopes.insert("terminal:write".into(), vec!["pane-1".into()]);
         assert!(info.check_scope("terminal:write", "pane-1"));
         assert!(!info.check_scope("terminal:write", "pane-2"));
+    }
+
+    #[test]
+    fn check_boards_resume_capability_is_valid() {
+        assert!(ALL_CAPABILITIES.contains(&"terminal:resume"));
+    }
+
+    #[test]
+    fn required_scope_denies_unscoped_tokens() {
+        let mut info = TokenInfo {
+            token_id: "test".into(),
+            is_global: false,
+            capabilities: ["terminal:resume"].iter().map(|s| s.to_string()).collect(),
+            scopes: HashMap::new(),
+        };
+        assert!(!info.check_required_scope("terminal:resume", "profile-1"));
+        info.scopes.insert("terminal:resume".into(), vec!["profile-1".into()]);
+        assert!(info.check_required_scope("terminal:resume", "profile-1"));
+        assert!(!info.check_required_scope("terminal:resume", "profile-2"));
+    }
+
+    #[test]
+    fn global_token_is_the_explicit_required_scope_exception() {
+        assert!(TokenInfo::global().check_required_scope("terminal:resume", "profile-1"));
     }
 }

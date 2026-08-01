@@ -26,6 +26,14 @@ pub struct SyncClient {
     pub tx: mpsc::UnboundedSender<String>,
 }
 
+#[derive(Clone)]
+pub struct ResumeTabState {
+    pub tab_id: String,
+    pub pane_id: String,
+    pub executed: bool,
+    pub capacity_permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SyncMsg {
@@ -181,6 +189,10 @@ pub struct SessionManager {
     pub sync_clients: Arc<Mutex<Vec<SyncClient>>>,
     pub active_pane_id: Arc<Mutex<Option<String>>>,
     pub tab_layouts: DashMap<String, serde_json::Value>,
+    pub resume_tabs: DashMap<String, ResumeTabState>,
+    pub resume_locks: Vec<tokio::sync::Mutex<()>>,
+    pub resume_capacity: Arc<tokio::sync::Semaphore>,
+    pub resume_tabs_guard: Mutex<()>,
     pub pending_ssh_auth: DashMap<String, crate::session::backend::PendingSshAuth>,
     pub tab_order: Mutex<Vec<String>>,
     pub event_bus: EventBus,
@@ -205,6 +217,10 @@ impl SessionManager {
             sync_clients: Arc::new(Mutex::new(Vec::new())),
             active_pane_id: Arc::new(Mutex::new(None)),
             tab_layouts: DashMap::new(),
+            resume_tabs: DashMap::new(),
+            resume_locks: (0..64).map(|_| tokio::sync::Mutex::new(())).collect(),
+            resume_capacity: Arc::new(tokio::sync::Semaphore::new(1024)),
+            resume_tabs_guard: Mutex::new(()),
             tab_order: Mutex::new(Vec::new()),
             pending_ssh_auth: DashMap::new(),
             event_bus: EventBus::new(),
@@ -233,19 +249,54 @@ impl SessionManager {
 
     /// Insert a tab layout and record its order position.
     pub fn insert_tab(&self, tab_id: String, value: serde_json::Value) {
+        let _resume_guard =
+            self.resume_tabs_guard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let updated_tab_id = tab_id.clone();
         let mut order = self.tab_order.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !order.contains(&tab_id) {
             order.push(tab_id.clone());
         }
         drop(order);
         self.tab_layouts.insert(tab_id, value);
+        self.resume_tabs.retain(|_, resume| {
+            resume.tab_id != updated_tab_id || self.resume_tab_matches_layout(resume)
+        });
     }
 
     /// Remove a tab layout and its order entry.
     pub fn remove_tab(&self, tab_id: &str) {
+        let _resume_guard =
+            self.resume_tabs_guard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.tab_layouts.remove(tab_id);
+        self.resume_tabs.retain(|_, resume| resume.tab_id != tab_id);
         let mut order = self.tab_order.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         order.retain(|id| id != tab_id);
+    }
+
+    fn resume_tab_matches_layout(&self, resume: &ResumeTabState) -> bool {
+        self.tab_layouts
+            .get(&resume.tab_id)
+            .and_then(|value| value.get("layout").cloned())
+            .is_some_and(|layout| {
+                collect_leaf_pane_ids(&layout).iter().any(|pane_id| pane_id == &resume.pane_id)
+            })
+    }
+
+    fn remove_resume_tabs_for_pane(&self, pane_id: &str) {
+        let _resume_guard =
+            self.resume_tabs_guard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.resume_tabs.retain(|_, resume| resume.pane_id != pane_id);
+    }
+
+    fn take_session_for_close(&self, pane_id: &str) -> Option<Arc<Session>> {
+        let _resume_guard =
+            self.resume_tabs_guard.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.resume_tabs.retain(|_, resume| resume.pane_id != pane_id);
+        self.sessions.remove(pane_id).map(|(_, session)| session)
+    }
+
+    pub fn remove_exited_session(&self, pane_id: &str) -> bool {
+        self.take_session_for_close(pane_id).is_some()
     }
 
     /// Check if a `pane_id` belongs to any registered tab layout.
@@ -330,7 +381,7 @@ impl SessionManager {
     /// By killing the child first, the reader's `read()` returns Err/Ok(0),
     /// causing it to exit and release its `Arc`.
     pub fn kill_and_remove(&self, pane_id: &str) -> bool {
-        if let Some((_, session)) = self.sessions.remove(pane_id) {
+        if let Some(session) = self.take_session_for_close(pane_id) {
             session.kill_child();
             // Drop the input channel sender so the writer task's recv() returns
             // None and the task exits, releasing its Arc<Session>.
@@ -410,12 +461,7 @@ impl SessionManager {
                 .collect()
         };
         for key in &stale {
-            self.tab_layouts.remove(key);
-        }
-        if !stale.is_empty() {
-            let mut order =
-                self.tab_order.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            order.retain(|id| !stale.contains(id));
+            self.remove_tab(key);
         }
 
         let order = self.tab_order.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -457,6 +503,7 @@ impl SessionManager {
     /// or update the layout (multi-pane). Returns the tab-level `pane_id` for
     /// single-pane tabs so the caller can broadcast `TabClosed`.
     pub fn on_pty_exited(&self, leaf_pane_id: &str) -> Option<String> {
+        self.remove_resume_tabs_for_pane(leaf_pane_id);
         // Find the tab layout that contains this leaf
         let mut found_tab_id: Option<String> = None;
         for entry in &self.tab_layouts {

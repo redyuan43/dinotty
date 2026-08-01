@@ -809,6 +809,139 @@ fn remove_nonexistent_tab_no_panic() {
     manager.remove_tab("nonexistent"); // should not panic
 }
 
+#[test]
+fn remove_tab_releases_resume_capacity_immediately() {
+    let manager = SessionManager::new();
+    manager.insert_tab(
+        "tab-1".into(),
+        serde_json::json!({
+            "layout": { "type": "leaf", "paneId": "pane-1" },
+            "active_pane_id": "pane-1"
+        }),
+    );
+    let permit = std::sync::Arc::new(
+        manager.resume_capacity.clone().try_acquire_owned().expect("capacity available"),
+    );
+    manager.resume_tabs.insert(
+        "profile-1\0session-1".into(),
+        ResumeTabState {
+            tab_id: "tab-1".into(),
+            pane_id: "pane-1".into(),
+            executed: true,
+            capacity_permit: permit,
+        },
+    );
+    assert_eq!(manager.resume_capacity.available_permits(), 1023);
+
+    manager.remove_tab("tab-1");
+
+    assert!(manager.resume_tabs.is_empty());
+    assert_eq!(manager.resume_capacity.available_permits(), 1024);
+}
+
+#[test]
+fn removing_only_the_resume_pane_releases_capacity() {
+    let manager = SessionManager::new();
+    manager.insert_tab(
+        "tab-1".into(),
+        serde_json::json!({
+            "layout": {
+                "type": "split",
+                "direction": "horizontal",
+                "children": [
+                    { "type": "leaf", "paneId": "resume-pane" },
+                    { "type": "leaf", "paneId": "other-pane" }
+                ]
+            },
+            "active_pane_id": "resume-pane"
+        }),
+    );
+    let permit = std::sync::Arc::new(
+        manager.resume_capacity.clone().try_acquire_owned().expect("capacity available"),
+    );
+    manager.resume_tabs.insert(
+        "profile-1\0session-1".into(),
+        ResumeTabState {
+            tab_id: "tab-1".into(),
+            pane_id: "resume-pane".into(),
+            executed: true,
+            capacity_permit: permit,
+        },
+    );
+
+    assert!(!manager.kill_and_remove("resume-pane"));
+
+    assert!(manager.resume_tabs.is_empty());
+    assert_eq!(manager.resume_capacity.available_permits(), 1024);
+    assert!(manager.tab_layouts.contains_key("tab-1"));
+}
+
+#[test]
+fn moving_resume_pane_out_of_its_tab_invalidates_mapping() {
+    let manager = SessionManager::new();
+    manager.insert_tab(
+        "tab-1".into(),
+        serde_json::json!({
+            "layout": {
+                "type": "split",
+                "direction": "horizontal",
+                "children": [
+                    { "type": "leaf", "paneId": "resume-pane" },
+                    { "type": "leaf", "paneId": "other-pane" }
+                ]
+            },
+            "active_pane_id": "resume-pane"
+        }),
+    );
+    let permit = std::sync::Arc::new(
+        manager.resume_capacity.clone().try_acquire_owned().expect("capacity available"),
+    );
+    manager.resume_tabs.insert(
+        "profile-1\0session-1".into(),
+        ResumeTabState {
+            tab_id: "tab-1".into(),
+            pane_id: "resume-pane".into(),
+            executed: true,
+            capacity_permit: permit,
+        },
+    );
+
+    manager.insert_tab(
+        "tab-1".into(),
+        serde_json::json!({
+            "layout": { "type": "leaf", "paneId": "other-pane" },
+            "active_pane_id": "other-pane"
+        }),
+    );
+
+    assert!(manager.resume_tabs.is_empty());
+    assert_eq!(manager.resume_capacity.available_permits(), 1024);
+}
+
+#[test]
+fn killing_resume_pane_removes_session_and_mapping_together() {
+    let manager = SessionManager::new();
+    manager.sessions.insert("resume-pane".into(), local_session_for_write_input());
+    let permit = std::sync::Arc::new(
+        manager.resume_capacity.clone().try_acquire_owned().expect("capacity available"),
+    );
+    manager.resume_tabs.insert(
+        "profile-1\0session-1".into(),
+        ResumeTabState {
+            tab_id: "tab-1".into(),
+            pane_id: "resume-pane".into(),
+            executed: true,
+            capacity_permit: permit,
+        },
+    );
+
+    assert!(manager.kill_and_remove("resume-pane"));
+
+    assert!(!manager.sessions.contains_key("resume-pane"));
+    assert!(manager.resume_tabs.is_empty());
+    assert_eq!(manager.resume_capacity.available_permits(), 1024);
+}
+
 // ── SessionManager::purge_pane_from_layouts ─────────────────────
 
 #[test]

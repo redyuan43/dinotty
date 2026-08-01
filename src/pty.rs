@@ -154,7 +154,7 @@ fn cleanup_exited_pty_session(
     session.input_tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
     let _ = session.output_tx.send(Vec::new());
 
-    if manager.sessions.remove(pane_id).is_some() {
+    if manager.remove_exited_session(pane_id) {
         manager.pane_closed_notify(pane_id);
         manager
             .event_bus

@@ -159,9 +159,9 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
-    // Agent WS has its own agent-token middleware; skip main auth so agent
-    // clients (which carry an agent token, not a session cookie) can connect.
-    if path == "/ws/agent" {
+    // Agent endpoints have their own agent-token middleware. Skip browser/session
+    // auth so scoped agent tokens can reach the capability and scope checks.
+    if uses_agent_token_auth(path) {
         return next.run(request).await;
     }
 
@@ -252,6 +252,14 @@ pub async fn auth_middleware(
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(r#"{"error":"unauthorized"}"#))
         .unwrap()
+}
+
+fn uses_agent_token_auth(path: &str) -> bool {
+    path == "/ws/agent"
+        || path == "/api/tokens"
+        || path.starts_with("/api/tokens/")
+        || path.starts_with("/api/agent/")
+        || path.starts_with("/mcp/")
 }
 
 /// Check whether a request carries a valid session cookie or Bearer token.
@@ -408,6 +416,20 @@ fn check_token(request: &Request, token: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod agent_auth_path_tests {
+    use super::uses_agent_token_auth;
+
+    #[test]
+    fn scoped_agent_routes_bypass_browser_session_auth() {
+        assert!(uses_agent_token_auth("/api/agent/check-boards/resume"));
+        assert!(uses_agent_token_auth("/api/tokens/abc"));
+        assert!(uses_agent_token_auth("/mcp/message"));
+        assert!(uses_agent_token_auth("/ws/agent"));
+        assert!(!uses_agent_token_auth("/api/tabs/ssh"));
+    }
 }
 
 #[must_use]

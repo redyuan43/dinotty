@@ -19,6 +19,7 @@ pub mod agent;
 pub mod attention;
 pub mod audit;
 pub mod auth;
+pub mod check_boards;
 pub mod event_bus;
 pub mod events;
 pub mod file_watcher;

@@ -1,5 +1,5 @@
 use crate::settings::SshAuthMethod;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// SSH 会话参数，用于分屏时复用连接信息
 #[derive(Clone, Debug)]
@@ -34,10 +34,23 @@ pub enum SessionBackend {
 pub enum SshCmd {
     /// Write input data to the SSH channel
     Input(Vec<u8>),
+    /// Write input and acknowledge the actual SSH channel result.
+    InputConfirmed {
+        data: Vec<u8>,
+        ready: oneshot::Sender<()>,
+        commit: oneshot::Receiver<()>,
+        ack: oneshot::Sender<SshWriteAck>,
+    },
     /// Resize the SSH channel
     Resize(u16, u16),
     /// Close the SSH channel
     Close,
+}
+
+pub enum SshWriteAck {
+    Delivered,
+    Failed(String),
+    Unknown(String),
 }
 
 /// SSH keyboard-interactive auth prompt
