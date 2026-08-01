@@ -366,18 +366,10 @@ pub async fn agent_token_middleware(
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    // Extract Bearer token
-    let bearer = request
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim);
-
-    let Some(raw_token) = bearer else {
+    let Some(raw_token) = extract_agent_token(request.headers()) else {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": {"code": "UNAUTHORIZED", "message": "Missing Authorization header"}})),
+            Json(serde_json::json!({"error": {"code": "UNAUTHORIZED", "message": "Missing agent token header"}})),
         )
             .into_response();
     };
@@ -404,6 +396,22 @@ pub async fn agent_token_middleware(
         )
             .into_response(),
     }
+}
+
+fn extract_agent_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get("x-dinotty-agent-token")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
 }
 
 // ── HTTP Handlers ──
@@ -553,6 +561,7 @@ pub async fn revoke_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
 
     fn make_manager() -> Arc<TokenManager> {
         Arc::new(TokenManager::new(Arc::new(RwLock::new("test-global-token".into()))))
@@ -662,5 +671,22 @@ mod tests {
     #[test]
     fn global_token_is_the_explicit_required_scope_exception() {
         assert!(TokenInfo::global().check_required_scope("terminal:resume", "profile-1"));
+    }
+
+    #[test]
+    fn agent_token_header_survives_reverse_proxies_that_strip_authorization() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dinotty-agent-token", HeaderValue::from_static("dnt_scoped"));
+        assert_eq!(extract_agent_token(&headers), Some("dnt_scoped"));
+    }
+
+    #[test]
+    fn bearer_token_remains_supported_for_direct_clients() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer dnt_direct"),
+        );
+        assert_eq!(extract_agent_token(&headers), Some("dnt_direct"));
     }
 }
